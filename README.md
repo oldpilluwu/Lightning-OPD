@@ -34,11 +34,11 @@ At the 4B scale, this reduces total GPU hours from **72 to 20** (3.6x speedup). 
   <img src="assets/cost.png" width="50%" alt="Training cost comparison"/>
 </p>
 
-### Release Progress
+### News
 
-- [x] Paper ([arXiv](https://www.arxiv.org/abs/2604.13010v1))
-- [x] Training code
-- [ ] Model weights (under legal review, coming soon)
+- \[2025.05\] We release the training code for Lightning OPD, including MoE (Qwen3-30B-A3B) support.
+- \[2025.04\] We release the [paper](https://www.arxiv.org/abs/2604.13010v1) on arXiv.
+- Model weights are under legal review and will be released soon. Stay tuned!
 
 ### Contents
 
