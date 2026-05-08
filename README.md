@@ -1,7 +1,7 @@
 # Lightning OPD: Efficient Post-Training for Large Reasoning Models with Offline On-Policy Distillation
 
 <div align="center">
-  <a href="https://www.arxiv.org/abs/2604.13010v1"><img src="https://img.shields.io/static/v1?label=arXiv&message=Lightning-OPD&color=red&logo=arxiv"></a> &ensp;
+  <a href="https://arxiv.org/abs/2604.13010"><img src="https://img.shields.io/static/v1?label=arXiv&message=Lightning-OPD&color=red&logo=arxiv"></a> &ensp;
   <a href="https://huggingface.co/Lightning-OPD"><img src="https://img.shields.io/static/v1?label=HuggingFace&message=Lightning-OPD&color=yellow&logo=huggingface"></a> &ensp;
 </div>
 
@@ -37,7 +37,7 @@ At the 4B scale, this reduces total GPU hours from **72 to 20** (3.6x speedup). 
 ### News
 
 - \[2025.05\] We release the training code for Lightning OPD, including MoE (Qwen3-30B-A3B) support.
-- \[2025.04\] We release the [paper](https://www.arxiv.org/abs/2604.13010v1) on arXiv.
+- \[2025.04\] We release the [paper](https://arxiv.org/abs/2604.13010) on arXiv.
 - Model weights are under legal review and will be released soon. Stay tuned!
 
 ### Contents
