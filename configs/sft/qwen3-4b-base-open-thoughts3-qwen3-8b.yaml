@@ -1,0 +1,41 @@
+### model
+model_name_or_path: Qwen/Qwen3-4B-Base
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z0_config.json 
+enable_liger_kernel: true
+packing: true
+
+
+### dataset
+dataset: openthoughts3_300k_qwen3-8b
+template: qwen3
+cutoff_len: 16384
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_persistent_workers: true
+dataloader_pin_memory: true
+dataloader_num_workers: 4
+
+### output
+logging_steps: 1
+save_steps: 100
+save_total_limit: 10
+plot_loss: true
+overwrite_output_dir: false
+save_only_model: false
+report_to: wandb
+run_name: qwen3-4b-base-open-thoughts3-qwen3-8b
+
+### train
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 2
+learning_rate: 8e-5
+max_steps: 3000
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
