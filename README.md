@@ -27,6 +27,9 @@ Lightning OPD is evaluated across dense models (Qwen3-4B-Base, Qwen3-8B-Base) an
 <p align="center">
   <img src="assets/main-results.png" width="80%" alt="Main results table"/>
 </p>
+<p align="center">
+  <img src="assets/moe-results.png" width="80%" alt="Main results table"/>
+</p>
 
 At the 4B scale, this reduces total GPU hours from **72 to 20** (3.6x speedup). At the 8B scale, from **120 to 30** (4.0x speedup). The infrastructure requirement drops from a multi-node teacher-plus-student setup to a single node for training. For MoE models, Lightning OPD enables on-policy distillation of the 30B-parameter Qwen3-30B-A3B on a single 8×H100 node, where standard OPD is infeasible due to the memory overhead of co-hosting both student and teacher.
 
