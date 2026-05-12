@@ -8,6 +8,10 @@
 <p align="center">
   <img src="assets/teaser.png" width="90%" alt="Lightning OPD achieves 3.6-4.0x speedup over standard OPD"/>
 </p>
+<p align="center">
+  <img src="assets/intuitive.png" width="90%" alt="Intuitive Comparsion of OPD and Lightning OPD"/>
+</p>
+
 
 ## 💡 Introduction
 
