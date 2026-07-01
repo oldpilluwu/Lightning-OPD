@@ -19,6 +19,7 @@ export USE_TENSORBOARD="${USE_TENSORBOARD:-1}"
 export TENSORBOARD_DIR="${TENSORBOARD_DIR:-${LOG_DIR}/tensorboard}"
 export LIGHTNING_OPD_OUTPUT_DIR="${LIGHTNING_OPD_OUTPUT_DIR:-checkpoints/qwen35_2b_9b/lightning_opd_fsdp_${RUN_ID}}"
 export HF_EXPORT_DIR="${HF_EXPORT_DIR:-checkpoints/qwen35_2b_9b/lightning_opd_hf_${RUN_ID}}"
+export SFT_PROBE_METRICS_DIR="${SFT_PROBE_METRICS_DIR:-${LOG_DIR}/sft_probe_metrics}"
 
 run_stage() {
     local env_name="$1"
@@ -28,6 +29,33 @@ run_stage() {
 
     echo "=== ${stage_name} | env=${env_name} | log=${log_path} ==="
     "${CONDA_BIN}" run -n "${env_name}" bash -lc "$*" 2>&1 | tee "${log_path}"
+}
+
+run_sft_with_monitor() {
+    local sft_log="${LOG_DIR}/02_run_sft.log"
+    local monitor_log="${LOG_DIR}/02_monitor_sft_saturation.log"
+
+    echo "=== 02_monitor_sft_saturation | env=${SFT_ENV} | log=${monitor_log} ==="
+    "${CONDA_BIN}" run -n "${SFT_ENV}" bash -lc "bash scripts/qwen35_2b_9b/02_monitor_sft_saturation.sh" \
+        > >(tee "${monitor_log}") 2>&1 &
+    local monitor_pid=$!
+
+    echo "=== 02_run_sft | env=${SFT_ENV} | log=${sft_log} ==="
+    set +e
+    "${CONDA_BIN}" run -n "${SFT_ENV}" bash -lc "bash scripts/qwen35_2b_9b/02_run_sft.sh" \
+        2>&1 | tee "${sft_log}"
+    local sft_status=${PIPESTATUS[0]}
+    set -e
+
+    kill "${monitor_pid}" >/dev/null 2>&1 || true
+    pkill -f "monitor_sft_saturation.py.*${SFT_OUTPUT_DIR:-checkpoints/qwen35_2b_9b/sft}" >/dev/null 2>&1 || true
+    wait "${monitor_pid}" >/dev/null 2>&1 || true
+
+    echo "=== 02_monitor_sft_saturation_final | env=${SFT_ENV} | log=${monitor_log} ==="
+    "${CONDA_BIN}" run -n "${SFT_ENV}" bash -lc "python scripts/qwen35_2b_9b/monitor_sft_saturation.py --checkpoint-dir \"\${SFT_OUTPUT_DIR:-checkpoints/qwen35_2b_9b/sft}\" --probe-parquet \"\${SFT_PROBE_PRECOMPUTED:-data/qwen35_2b_9b/sft_data/probe_teacher_logprobs.parquet}\" --output-dir \"\${SFT_PROBE_METRICS_DIR}\" --keep-latest \"\${SFT_PROBE_KEEP_LATEST:-1}\" --plateau-threshold \"\${SFT_PROBE_PLATEAU_THRESHOLD:-0.01}\" --plateau-patience \"\${SFT_PROBE_PLATEAU_PATIENCE:-3}\"" \
+        2>&1 | tee -a "${monitor_log}"
+
+    return "${sft_status}"
 }
 
 {
@@ -41,13 +69,20 @@ run_stage() {
     echo "opd_num_samples=${OPD_NUM_SAMPLES:-2000}"
     echo "sft_max_steps=${SFT_MAX_STEPS:-500}"
     echo "num_rollout=${NUM_ROLLOUT:-200}"
+    echo "sft_probe_size=${SFT_PROBE_SIZE:-512}"
+    echo "sft_probe_metrics_dir=${SFT_PROBE_METRICS_DIR}"
     echo "lightning_opd_output_dir=${LIGHTNING_OPD_OUTPUT_DIR}"
     echo "hf_export_dir=${HF_EXPORT_DIR}"
 } | tee "${LOG_DIR}/run.env"
 
 run_stage "${CURATION_ENV}" "00_prepare_prompts" "bash scripts/qwen35_2b_9b/00_prepare_prompts.sh"
 run_stage "${CURATION_ENV}" "01_generate_sft_data" "bash scripts/qwen35_2b_9b/01_generate_sft_data.sh"
-run_stage "${SFT_ENV}" "02_run_sft" "bash scripts/qwen35_2b_9b/02_run_sft.sh"
+run_stage "${TRAIN_ENV}" "01b_precompute_sft_probe_logprobs" "bash scripts/qwen35_2b_9b/01b_precompute_sft_probe_logprobs.sh"
+run_sft_with_monitor
+if [[ -f "${SFT_PROBE_METRICS_DIR}/selected_checkpoint.txt" ]]; then
+    export SFT_CHECKPOINT="$(cat "${SFT_PROBE_METRICS_DIR}/selected_checkpoint.txt")"
+    echo "Selected SFT checkpoint for OPD: ${SFT_CHECKPOINT}" | tee -a "${LOG_DIR}/run.env"
+fi
 run_stage "${CURATION_ENV}" "03_collect_rollouts" "bash scripts/qwen35_2b_9b/03_collect_rollouts.sh"
 run_stage "${TRAIN_ENV}" "05_precompute_teacher_logprobs" "bash scripts/qwen35_2b_9b/05_precompute_teacher_logprobs.sh"
 run_stage "${TRAIN_ENV}" "06_train_lightning_opd_fsdp" "bash scripts/qwen35_2b_9b/06_train_lightning_opd_fsdp.sh"

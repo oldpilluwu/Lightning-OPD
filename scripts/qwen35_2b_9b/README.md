@@ -40,6 +40,10 @@ Key files:
 
 - `drift/metrics.csv`
 - `drift/summary.txt`
+- `sft_probe_metrics/sft_probe_metrics.csv`
+- `sft_probe_metrics/summary.txt`
+- `sft_probe_metrics/best_checkpoint.txt`
+- `sft_probe_metrics/selected_checkpoint.txt`
 - `eval_sft.json`
 - `eval_final.json`
 - `tensorboard/`
@@ -51,6 +55,7 @@ Run from the repo root if you want to execute stages one by one.
 ```bash
 bash scripts/qwen35_2b_9b/00_prepare_prompts.sh
 bash scripts/qwen35_2b_9b/01_generate_sft_data.sh
+bash scripts/qwen35_2b_9b/01b_precompute_sft_probe_logprobs.sh
 bash scripts/qwen35_2b_9b/02_run_sft.sh
 bash scripts/qwen35_2b_9b/03_collect_rollouts.sh
 bash scripts/qwen35_2b_9b/05_precompute_teacher_logprobs.sh
@@ -85,6 +90,39 @@ Watch these drift signals:
 - `train/ppo_kl`
 - `train/kl_loss`
 - `train/entropy`
+
+## SFT Saturation Probe
+
+`run_all.sh` launches `02_monitor_sft_saturation.sh` while SFT is training. It evaluates each new `checkpoint-*` against a held-out teacher-answer probe and writes:
+
+```text
+logs/qwen35_2b_9b/<RUN_ID>/sft_probe_metrics/sft_probe_metrics.csv
+logs/qwen35_2b_9b/<RUN_ID>/sft_probe_metrics/summary.txt
+logs/qwen35_2b_9b/<RUN_ID>/sft_probe_metrics/best_checkpoint.txt
+```
+
+Metrics:
+
+- `student_nll`: student negative log likelihood on held-out teacher answers
+- `teacher_nll`: teacher negative log likelihood on the same answers
+- `gap`: `student_nll - teacher_nll`
+- `moving_improvement`: previous `gap - current gap`
+- `improvement_per_100_steps`: normalized improvement rate
+
+The default plateau rule is:
+
+```text
+abs(improvement_per_100_steps) < 0.01 for 3 evaluated checkpoints
+```
+
+`selected_checkpoint.txt` is the checkpoint used for OPD in `run_all.sh`: plateau checkpoint if one is found, otherwise the best-gap checkpoint.
+
+Storage behavior:
+
+- SFT save total limit defaults to `3`.
+- The monitor prunes evaluated SFT checkpoints, keeping the best checkpoint and latest checkpoint.
+- Set `SFT_PROBE_NO_PRUNE=1` to disable monitor pruning.
+- Set `SFT_PROBE_KEEP_LATEST=2` to retain more recent checkpoints.
 
 Suggested machine split:
 

@@ -40,13 +40,14 @@ echo "Installing curation env..."
 echo "Installing SFT env..."
 "${CONDA_BIN}" run -n "${SFT_ENV}" python -m pip install --upgrade pip
 "${CONDA_BIN}" run -n "${SFT_ENV}" python -m pip install \
-    "llamafactory" "torch" "transformers>=4.57.0" "datasets" "accelerate" "deepspeed" "liger-kernel" "wandb"
+    "llamafactory" "torch" "transformers>=4.57.0" "datasets" "accelerate" "deepspeed" \
+    "liger-kernel" "wandb" "pandas" "pyarrow" "tqdm"
 
 echo "Installing training/sglang env..."
 "${CONDA_BIN}" run -n "${TRAIN_ENV}" python -m pip install --upgrade pip
 "${CONDA_BIN}" run -n "${TRAIN_ENV}" python -m pip install -r requirements.txt
 "${CONDA_BIN}" run -n "${TRAIN_ENV}" python -m pip install \
-    "sglang[all]" "vllm" "transformers>=4.57.0" "tensorboard"
+    "sglang[all]" "vllm" "transformers>=4.57.0" "tensorboard" "aiohttp" "pandas" "pyarrow" "tqdm"
 "${CONDA_BIN}" run -n "${TRAIN_ENV}" python -m pip install -e .
 
 echo "Setup complete."

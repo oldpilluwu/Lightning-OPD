@@ -19,6 +19,26 @@ bash scripts/generate_sft_data.sh \
 
 python data_curation/merge.py \
     --input-dir "${RAW_DIR}" \
-    --output "${SFT_DATA}"
+    --output "${SFT_ALL_DATA}"
 
+python scripts/qwen35_2b_9b/split_sft_probe.py \
+    --input "${SFT_ALL_DATA}" \
+    --train-output "${SFT_DATA}" \
+    --probe-output "${SFT_PROBE_DATA}" \
+    --probe-size "${SFT_PROBE_SIZE}"
+
+if [[ "${KEEP_RAW_SFT_SHARDS:-0}" != "1" ]]; then
+    rm -rf "${RAW_DIR}"
+fi
+
+if [[ "${KEEP_SFT_ALL_DATA:-0}" != "1" ]]; then
+    rm -f "${SFT_ALL_DATA}"
+fi
+
+if [[ -f "${SFT_ALL_DATA}" ]]; then
+    echo "All SFT parquet: ${SFT_ALL_DATA}"
+else
+    echo "All SFT parquet removed after split. Set KEEP_SFT_ALL_DATA=1 to retain it."
+fi
 echo "SFT parquet: ${SFT_DATA}"
+echo "SFT probe parquet: ${SFT_PROBE_DATA}"
