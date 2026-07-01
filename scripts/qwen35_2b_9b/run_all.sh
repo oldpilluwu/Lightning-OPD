@@ -6,6 +6,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 CONDA_BIN="${CONDA_BIN:-conda}"
+if ! command -v "${CONDA_BIN}" >/dev/null 2>&1; then
+    if [[ -x "${HOME}/miniconda3/bin/conda" ]]; then
+        CONDA_BIN="${HOME}/miniconda3/bin/conda"
+    else
+        echo "conda not found. Run scripts/qwen35_2b_9b/setup_remote.sh first, or set CONDA_BIN=/path/to/conda." >&2
+        exit 1
+    fi
+fi
 CURATION_ENV="${CURATION_ENV:-qwen35-curation}"
 SFT_ENV="${SFT_ENV:-qwen35-sft}"
 TRAIN_ENV="${TRAIN_ENV:-qwen35-train}"

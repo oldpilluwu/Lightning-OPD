@@ -11,6 +11,33 @@ SFT_ENV="${SFT_ENV:-qwen35-sft}"
 TRAIN_ENV="${TRAIN_ENV:-qwen35-train}"
 
 CONDA_BIN="${CONDA_BIN:-conda}"
+MINICONDA_DIR="${MINICONDA_DIR:-${HOME}/miniconda3}"
+
+ensure_conda() {
+    if command -v "${CONDA_BIN}" >/dev/null 2>&1; then
+        return
+    fi
+
+    if [[ -x "${MINICONDA_DIR}/bin/conda" ]]; then
+        CONDA_BIN="${MINICONDA_DIR}/bin/conda"
+        return
+    fi
+
+    echo "conda not found. Installing Miniconda to ${MINICONDA_DIR}..."
+    local installer="/tmp/miniconda.sh"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o "${installer}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O "${installer}"
+    else
+        echo "Neither curl nor wget is available. Install one of them or install Miniconda manually." >&2
+        exit 1
+    fi
+
+    bash "${installer}" -b -p "${MINICONDA_DIR}"
+    CONDA_BIN="${MINICONDA_DIR}/bin/conda"
+    "${CONDA_BIN}" config --set auto_activate_base false
+}
 
 have_env() {
     "${CONDA_BIN}" env list | awk '{print $1}' | grep -qx "$1"
@@ -27,6 +54,9 @@ create_env() {
 
 echo "Repository: ${ROOT_DIR}"
 echo "CUDA visible devices: ${CUDA_VISIBLE_DEVICES:-all}"
+
+ensure_conda
+echo "Using conda: ${CONDA_BIN}"
 
 create_env "${CURATION_ENV}"
 create_env "${SFT_ENV}"
