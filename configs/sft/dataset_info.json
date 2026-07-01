@@ -12,5 +12,12 @@
     "columns": {
       "messages": "messages"
     }
+  },
+  "qwen35_2b9b_sft": {
+    "file_name": "data/qwen35_2b_9b/sft_data/sft.parquet",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    }
   }
 }

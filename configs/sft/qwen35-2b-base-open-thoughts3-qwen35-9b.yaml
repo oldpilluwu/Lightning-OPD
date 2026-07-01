@@ -1,0 +1,41 @@
+### model
+model_name_or_path: Qwen/Qwen3.5-2B-Base
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z0_config.json
+enable_liger_kernel: true
+packing: true
+
+### dataset
+dataset: qwen35_2b9b_sft
+template: qwen3
+cutoff_len: 8192
+overwrite_cache: true
+preprocessing_num_workers: 8
+dataloader_persistent_workers: true
+dataloader_pin_memory: true
+dataloader_num_workers: 2
+
+### output
+logging_steps: 1
+save_steps: 50
+save_total_limit: 5
+plot_loss: true
+overwrite_output_dir: false
+save_only_model: false
+report_to: none
+run_name: qwen35-2b-base-open-thoughts3-qwen35-9b
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 8e-5
+max_steps: 200
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
