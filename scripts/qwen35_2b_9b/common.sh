@@ -27,6 +27,7 @@ SFT_PROMPTS="${SFT_PROMPTS:-${EXP_DIR}/prompts/openthoughts3_${SFT_NUM_SAMPLES}.
 OPD_PROMPTS="${OPD_PROMPTS:-${EXP_DIR}/prompts/dapo-math-17k/dapo-math-17k.jsonl}"
 SFT_ALL_DATA="${SFT_ALL_DATA:-${EXP_DIR}/sft_data/all.parquet}"
 SFT_DATA="${SFT_DATA:-${EXP_DIR}/sft_data/train.parquet}"
+SFT_LLAMAFACTORY_DATA="${SFT_LLAMAFACTORY_DATA:-${EXP_DIR}/sft_data/train_llamafactory.parquet}"
 SFT_PROBE_DATA="${SFT_PROBE_DATA:-${EXP_DIR}/sft_data/probe.parquet}"
 SFT_PROBE_PRECOMPUTED="${SFT_PROBE_PRECOMPUTED:-${EXP_DIR}/sft_data/probe_teacher_logprobs.parquet}"
 SFT_PROBE_SIZE="${SFT_PROBE_SIZE:-512}"

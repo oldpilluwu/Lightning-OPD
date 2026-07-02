@@ -2,6 +2,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+SFT_LLAMAFACTORY_DATA="${SFT_LLAMAFACTORY_DATA:-${EXP_DIR}/sft_data/train_llamafactory.parquet}"
 NUM_NODES="${NUM_NODES:-1}"
 MASTER_ADDR="${MASTER_ADDR:-localhost}"
 SFT_MAX_STEPS="${SFT_MAX_STEPS:-500}"
@@ -14,6 +15,10 @@ SFT_DEEPSPEED_CONFIG="${SFT_DEEPSPEED_CONFIG:-}"
 SFT_TEMPLATE="${SFT_TEMPLATE:-qwen}"
 
 mkdir -p "${SFT_OUTPUT_DIR}"
+
+python scripts/qwen35_2b_9b/convert_sft_to_llamafactory.py \
+    --input "${SFT_DATA}" \
+    --output "${SFT_LLAMAFACTORY_DATA}"
 
 if command -v llamafactory-cli >/dev/null 2>&1; then
     LLAMAFACTORY_TRAIN=(llamafactory-cli train)

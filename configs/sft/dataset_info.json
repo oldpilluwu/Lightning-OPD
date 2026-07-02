@@ -14,7 +14,7 @@
     }
   },
   "qwen35_2b9b_sft": {
-    "file_name": "../../data/qwen35_2b_9b/sft_data/train.parquet",
+    "file_name": "../../data/qwen35_2b_9b/sft_data/train_llamafactory.parquet",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages"
