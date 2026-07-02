@@ -30,6 +30,13 @@ Run the full pipeline, export the final HF model, inspect drift logs, and run a 
 bash scripts/qwen35_2b_9b/run_all.sh
 ```
 
+If stage `01_generate_sft_data` was already running and you want to stop it, increase vLLM batch settings, and continue the full pipeline:
+
+```bash
+pkill -f "data_curation/pipeline.py"
+BATCH_SIZE=16 MAX_TOKENS=2048 bash scripts/qwen35_2b_9b/resume_from_sft_generation.sh
+```
+
 Outputs go under:
 
 ```text
@@ -68,7 +75,7 @@ bash scripts/qwen35_2b_9b/08_eval_math.sh
 Useful overrides:
 
 ```bash
-NUM_GPUS=1 TP_SIZE=1 BATCH_SIZE=2 MAX_TOKENS=2048 bash scripts/qwen35_2b_9b/01_generate_sft_data.sh
+NUM_GPUS=1 TP_SIZE=1 BATCH_SIZE=16 MAX_TOKENS=2048 bash scripts/qwen35_2b_9b/01_generate_sft_data.sh
 SFT_MAX_STEPS=1000 SFT_CUTOFF_LEN=8192 bash scripts/qwen35_2b_9b/02_run_sft.sh
 START_TEACHER=0 TEACHER_URL=http://127.0.0.1:13141/generate bash scripts/qwen35_2b_9b/05_precompute_teacher_logprobs.sh
 NUM_ROLLOUT=300 ROLLOUT_BATCH_SIZE=8 GLOBAL_BATCH_SIZE=8 bash scripts/qwen35_2b_9b/06_train_lightning_opd_fsdp.sh

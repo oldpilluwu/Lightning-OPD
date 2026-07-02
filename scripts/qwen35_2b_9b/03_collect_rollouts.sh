@@ -16,6 +16,11 @@ bash scripts/collect_rollouts.sh \
     --num-samples "${OPD_NUM_SAMPLES}" \
     --max-tokens "${MAX_TOKENS}" \
     --batch-size "${BATCH_SIZE}" \
+    --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}" \
+    --max-model-len "${VLLM_MAX_MODEL_LEN}" \
+    --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
+    --max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}" \
+    --dtype "${VLLM_DTYPE}" \
     "$@"
 
 python data_curation/merge.py \

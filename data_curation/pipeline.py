@@ -103,6 +103,11 @@ def run_curation(args: argparse.Namespace) -> None:
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=True,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
+        max_num_seqs=args.max_num_seqs,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        dtype=args.dtype,
     )
 
     sampling_params = SamplingParams(
@@ -188,6 +193,16 @@ def parse_args() -> argparse.Namespace:
                    help="Number of responses per prompt (default: 1).")
     p.add_argument("--batch-size", type=int, default=32,
                    help="Prompts per vLLM batch call (default: 32).")
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.90,
+                   help="vLLM GPU memory utilization fraction (default: 0.90).")
+    p.add_argument("--max-model-len", type=int, default=None,
+                   help="vLLM max model length. Lowering this can improve KV capacity.")
+    p.add_argument("--max-num-seqs", type=int, default=None,
+                   help="Maximum concurrent sequences scheduled by vLLM.")
+    p.add_argument("--max-num-batched-tokens", type=int, default=None,
+                   help="Maximum batched tokens scheduled by vLLM.")
+    p.add_argument("--dtype", type=str, default="auto",
+                   help="vLLM dtype (default: auto). Try bfloat16 on Ampere/Ada/Blackwell.")
 
     # Parallelism
     p.add_argument("--tensor-parallel-size", type=int, default=1,
