@@ -13,8 +13,28 @@ SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-1}"
 SFT_GRAD_ACCUM="${SFT_GRAD_ACCUM:-8}"
 SFT_DEEPSPEED_CONFIG="${SFT_DEEPSPEED_CONFIG:-}"
 SFT_TEMPLATE="${SFT_TEMPLATE:-qwen}"
+SFT_BACKEND="${SFT_BACKEND:-native}"
+SFT_NUM_WORKERS="${SFT_NUM_WORKERS:-2}"
 
 mkdir -p "${SFT_OUTPUT_DIR}"
+
+if [[ "${SFT_BACKEND}" == "native" ]]; then
+    python scripts/qwen35_2b_9b/run_sft_native.py \
+        --model-name-or-path "${STUDENT_BASE}" \
+        --train-parquet "${SFT_DATA}" \
+        --output-dir "${SFT_OUTPUT_DIR}" \
+        --max-steps "${SFT_MAX_STEPS}" \
+        --save-steps "${SFT_SAVE_STEPS}" \
+        --save-total-limit "${SFT_SAVE_TOTAL_LIMIT}" \
+        --cutoff-len "${SFT_CUTOFF_LEN}" \
+        --per-device-train-batch-size "${SFT_BATCH_SIZE}" \
+        --gradient-accumulation-steps "${SFT_GRAD_ACCUM}" \
+        --learning-rate 8e-5 \
+        --warmup-ratio 0.1 \
+        --num-workers "${SFT_NUM_WORKERS}"
+    echo "SFT output: ${SFT_OUTPUT_DIR}"
+    exit 0
+fi
 
 python scripts/qwen35_2b_9b/convert_sft_to_llamafactory.py \
     --input "${SFT_DATA}" \
