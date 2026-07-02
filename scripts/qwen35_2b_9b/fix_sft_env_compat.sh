@@ -15,7 +15,7 @@ fi
 SFT_ENV="${SFT_ENV:-qwen35-sft}"
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" \
-    python -m pip install --force-reinstall "trl==0.9.6" "transformers>=4.57.0,<5.0.0"
+    python -m pip install --force-reinstall "trl==0.9.6" "transformers>=4.57.0,<5.0.0" "jieba" "nltk"
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" python - <<'PY'
 import site
@@ -37,6 +37,22 @@ try:
         _llama.LlamaFlashAttention2 = _llama.LlamaAttention
     if not hasattr(_llama, "LlamaSdpaAttention") and hasattr(_llama, "LlamaAttention"):
         _llama.LlamaSdpaAttention = _llama.LlamaAttention
+except Exception:
+    pass
+
+try:
+    import importlib.util
+    import transformers.utils as _tf_utils
+
+    if not hasattr(_tf_utils, "is_jieba_available"):
+        def is_jieba_available():
+            return importlib.util.find_spec("jieba") is not None
+        _tf_utils.is_jieba_available = is_jieba_available
+
+    if not hasattr(_tf_utils, "is_nltk_available"):
+        def is_nltk_available():
+            return importlib.util.find_spec("nltk") is not None
+        _tf_utils.is_nltk_available = is_nltk_available
 except Exception:
     pass
 '''
