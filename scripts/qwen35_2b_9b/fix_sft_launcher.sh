@@ -41,11 +41,9 @@ fi
 
 SFT_ARGS=(
     --model_name_or_path "${STUDENT_BASE}" \\
-    --trust_remote_code true \\
     --stage sft \\
     --do_train true \\
     --finetuning_type full \\
-    --enable_liger_kernel true \\
     --packing true \\
     --dataset qwen35_2b9b_sft \\
     --dataset_dir configs/sft \\
