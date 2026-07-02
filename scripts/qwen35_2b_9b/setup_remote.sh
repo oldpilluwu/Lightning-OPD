@@ -98,6 +98,17 @@ run_in_env "${SFT_ENV}" "sft_00_pip" "python -m pip install --upgrade pip"
 pip_install "${SFT_ENV}" "sft_01_core" \
     "torch" "transformers>=4.57.0,<5.0.0" "datasets" "accelerate" "pandas" "pyarrow" "tqdm" "wandb" "huggingface_hub[cli]"
 pip_install "${SFT_ENV}" "sft_02_training" "llamafactory" "deepspeed" "liger-kernel"
+pip_install "${SFT_ENV}" "sft_03_compat" "trl==0.9.6" "transformers>=4.57.0,<5.0.0"
+run_in_env "${SFT_ENV}" "sft_04_import_check" \
+    "python - <<'PY'
+import transformers
+from transformers import AutoModelForVision2Seq
+from trl import AutoModelForCausalLMWithValueHead
+import llamafactory
+print('transformers', transformers.__version__)
+print('llamafactory import ok')
+print('trl value head import ok')
+PY"
 
 echo "Installing training/sglang env..."
 run_in_env "${TRAIN_ENV}" "train_00_pip" "python -m pip install --upgrade pip"
