@@ -34,6 +34,7 @@ from pathlib import Path
 site_packages = Path(site.getsitepackages()[0])
 transformers_init = site_packages / "transformers" / "__init__.py"
 transformers_utils_init = site_packages / "transformers" / "utils" / "__init__.py"
+modeling_auto = site_packages / "transformers" / "models" / "auto" / "modeling_auto.py"
 alias_marker = "# qwen35_sft_compat_autovision2seq"
 if transformers_init.exists():
     init_text = transformers_init.read_text()
@@ -57,6 +58,24 @@ except NameError:
 '''
         transformers_init.write_text(init_text)
         print(f"patched {transformers_init}")
+
+modeling_marker = "# qwen35_sft_compat_vision_mapping"
+if modeling_auto.exists():
+    modeling_text = modeling_auto.read_text()
+    if modeling_marker not in modeling_text:
+        modeling_text += r'''
+
+# qwen35_sft_compat_vision_mapping
+try:
+    MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES
+except NameError:
+    try:
+        MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES = MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+    except NameError:
+        MODEL_FOR_VISION_2_SEQ_MAPPING_NAMES = {}
+'''
+        modeling_auto.write_text(modeling_text)
+        print(f"patched {modeling_auto}")
 
 utils_marker = "# qwen35_sft_compat_utils"
 if transformers_utils_init.exists():
@@ -321,6 +340,7 @@ import transformers
 from transformers import Qwen3_5ForCausalLM
 from transformers.utils import is_safetensors_available, is_torch_sdpa_available
 from trl import AutoModelForCausalLMWithValueHead
+from trl import DPOTrainer
 import llamafactory
 from llamafactory.model.loader import AutoModelForVision2Seq
 print("transformers", transformers.__version__)
@@ -328,5 +348,6 @@ print("qwen3_5 class", Qwen3_5ForCausalLM.__name__)
 print("vision fallback", AutoModelForVision2Seq.__name__)
 print("sdpa available", is_torch_sdpa_available())
 print("safetensors available", is_safetensors_available())
+print("trl dpo", DPOTrainer.__name__)
 print("imports ok")
 PY
