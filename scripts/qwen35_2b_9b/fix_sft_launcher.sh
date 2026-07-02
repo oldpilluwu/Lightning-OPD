@@ -7,6 +7,12 @@ cd "${ROOT_DIR}"
 
 python - <<'PY'
 from pathlib import Path
+import json
+
+dataset_info = Path("configs/sft/dataset_info.json")
+info = json.loads(dataset_info.read_text())
+info["qwen35_2b9b_sft"]["file_name"] = "../../data/qwen35_2b_9b/sft_data/train.parquet"
+dataset_info.write_text(json.dumps(info, indent=2) + "\n")
 
 qwen_sft = Path("scripts/qwen35_2b_9b/02_run_sft.sh")
 qwen_sft.write_text("""#!/usr/bin/env bash
@@ -118,6 +124,7 @@ generic_sft.write_text(text)
 
 print(f"rewrote {qwen_sft}")
 print(f"checked {generic_sft}")
+print(f"patched {dataset_info}")
 PY
 
 chmod +x scripts/qwen35_2b_9b/02_run_sft.sh
