@@ -15,7 +15,16 @@ fi
 SFT_ENV="${SFT_ENV:-qwen35-sft}"
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" \
-    python -m pip install --force-reinstall "trl==0.9.6" "transformers>=4.57.0,<5.0.0" "jieba" "nltk"
+    python -m pip install --upgrade "pip" "setuptools" "wheel"
+
+"${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" \
+    python -m pip install --upgrade --no-deps "trl==0.9.6"
+
+"${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" \
+    python -m pip install --upgrade "jieba" "nltk" "huggingface_hub[cli]" "safetensors" "tokenizers"
+
+"${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" \
+    python -m pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" python - <<'PY'
 import site
@@ -63,8 +72,10 @@ PY
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" python - <<'PY'
 import transformers
 from transformers import AutoModelForVision2Seq
+from transformers import Qwen3_5ForCausalLM
 from trl import AutoModelForCausalLMWithValueHead
 import llamafactory
 print("transformers", transformers.__version__)
+print("qwen3_5 class", Qwen3_5ForCausalLM.__name__)
 print("imports ok")
 PY

@@ -96,10 +96,9 @@ pip_install "${CURATION_ENV}" "curation_02_vllm" "vllm"
 echo "Installing SFT env..."
 run_in_env "${SFT_ENV}" "sft_00_pip" "python -m pip install --upgrade pip"
 pip_install "${SFT_ENV}" "sft_01_core" \
-    "torch" "transformers>=4.57.0,<5.0.0" "datasets" "accelerate" "pandas" "pyarrow" "tqdm" "wandb" "huggingface_hub[cli]"
+    "torch" "datasets" "accelerate" "pandas" "pyarrow" "tqdm" "wandb" "huggingface_hub[cli]"
 pip_install "${SFT_ENV}" "sft_02_training" "llamafactory" "deepspeed" "liger-kernel"
-pip_install "${SFT_ENV}" "sft_03_compat" "trl==0.9.6" "transformers>=4.57.0,<5.0.0" "jieba" "nltk"
-run_in_env "${SFT_ENV}" "sft_04_compat_shim" "bash scripts/qwen35_2b_9b/fix_sft_env_compat.sh"
+run_in_env "${SFT_ENV}" "sft_03_qwen35_compat" "bash scripts/qwen35_2b_9b/fix_sft_env_compat.sh"
 
 echo "Installing training/sglang env..."
 run_in_env "${TRAIN_ENV}" "train_00_pip" "python -m pip install --upgrade pip"
