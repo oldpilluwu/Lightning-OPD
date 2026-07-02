@@ -31,6 +31,50 @@ import site
 from pathlib import Path
 
 site_packages = Path(site.getsitepackages()[0])
+transformers_init = site_packages / "transformers" / "__init__.py"
+alias_marker = "# qwen35_sft_compat_autovision2seq"
+if transformers_init.exists():
+    init_text = transformers_init.read_text()
+    if alias_marker not in init_text:
+        init_text += r'''
+
+# qwen35_sft_compat_autovision2seq
+try:
+    AutoModelForVision2Seq
+except NameError:
+    try:
+        AutoModelForVision2Seq = AutoModelForImageTextToText
+    except NameError:
+        try:
+            AutoModelForVision2Seq = AutoModelForConditionalGeneration
+        except NameError:
+            try:
+                AutoModelForVision2Seq = AutoModelForCausalLM
+            except NameError:
+                pass
+'''
+        transformers_init.write_text(init_text)
+        print(f"patched {transformers_init}")
+
+loader = site_packages / "llamafactory" / "model" / "loader.py"
+old_import = "from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq, AutoProcessor, AutoTokenizer"
+new_import = """from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+try:
+    from transformers import AutoModelForVision2Seq
+except ImportError:
+    try:
+        from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
+    except ImportError:
+        try:
+            from transformers import AutoModelForConditionalGeneration as AutoModelForVision2Seq
+        except ImportError:
+            AutoModelForVision2Seq = AutoModelForCausalLM"""
+if loader.exists():
+    loader_text = loader.read_text()
+    if old_import in loader_text:
+        loader.write_text(loader_text.replace(old_import, new_import))
+        print(f"patched {loader}")
+
 shim = site_packages / "sitecustomize.py"
 body = r'''
 """Compatibility shims for older LLaMA-Factory imports.
@@ -86,11 +130,12 @@ PY
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" python - <<'PY'
 import transformers
-from transformers import AutoModelForVision2Seq
 from transformers import Qwen3_5ForCausalLM
 from trl import AutoModelForCausalLMWithValueHead
 import llamafactory
+from llamafactory.model.loader import AutoModelForVision2Seq
 print("transformers", transformers.__version__)
 print("qwen3_5 class", Qwen3_5ForCausalLM.__name__)
+print("vision fallback", AutoModelForVision2Seq.__name__)
 print("imports ok")
 PY
