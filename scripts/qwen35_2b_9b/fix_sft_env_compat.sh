@@ -21,13 +21,14 @@ SFT_ENV="${SFT_ENV:-qwen35-sft}"
     python -m pip install --upgrade --no-deps "trl==0.9.6"
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" \
-    python -m pip install --upgrade "jieba" "nltk" "huggingface_hub[cli]" "safetensors" "tokenizers"
+    python -m pip install --upgrade "jieba" "nltk" "huggingface_hub[cli]" "safetensors" "tokenizers>=0.22.0,<=0.23.0"
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" \
     python -m pip install --upgrade --no-cache-dir "git+https://github.com/huggingface/transformers.git"
 
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" python - <<'PY'
 import site
+import re
 from pathlib import Path
 
 site_packages = Path(site.getsitepackages()[0])
@@ -119,9 +120,38 @@ except ImportError:
             return False"""
 if attention.exists():
     attention_text = attention.read_text()
-    if old_attention_import in attention_text:
-        attention.write_text(attention_text.replace(old_attention_import, new_attention_import))
+    attention_text = attention_text.replace(
+        "try:\nfrom transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available",
+        new_attention_import,
+    )
+    attention_text = attention_text.replace(
+        "try:\ntry:\n    from transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available",
+        new_attention_import,
+    )
+    attention_text, count = re.subn(
+        r"(?m)^from transformers\.utils import is_flash_attn_2_available, is_torch_sdpa_available\s*$",
+        new_attention_import,
+        attention_text,
+    )
+    attention.write_text(attention_text)
+    if count:
         print(f"patched {attention}")
+
+    try:
+        compile(attention.read_text(), str(attention), "exec")
+    except IndentationError:
+        broken = attention.read_text()
+        broken = broken.replace(
+            "try:\ntry:\n    from transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available",
+            new_attention_import,
+        )
+        broken = broken.replace(
+            "try:\nfrom transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available",
+            new_attention_import,
+        )
+        attention.write_text(broken)
+        compile(attention.read_text(), str(attention), "exec")
+        print(f"repaired indentation in {attention}")
 
 shim = site_packages / "sitecustomize.py"
 body = r'''
