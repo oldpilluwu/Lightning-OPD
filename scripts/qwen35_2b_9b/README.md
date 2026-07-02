@@ -40,6 +40,7 @@ BATCH_SIZE=16 MAX_TOKENS=2048 bash scripts/qwen35_2b_9b/resume_from_sft_generati
 If curation and SFT-probe precompute already completed, but SFT failed, resume from SFT:
 
 ```bash
+bash scripts/qwen35_2b_9b/fix_sft_env_compat.sh
 bash scripts/qwen35_2b_9b/resume_from_sft.sh
 ```
 
