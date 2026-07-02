@@ -11,6 +11,7 @@ SFT_CUTOFF_LEN="${SFT_CUTOFF_LEN:-8192}"
 SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-1}"
 SFT_GRAD_ACCUM="${SFT_GRAD_ACCUM:-8}"
 SFT_DEEPSPEED_CONFIG="${SFT_DEEPSPEED_CONFIG:-}"
+SFT_TEMPLATE="${SFT_TEMPLATE:-qwen}"
 
 mkdir -p "${SFT_OUTPUT_DIR}"
 
@@ -36,7 +37,7 @@ SFT_ARGS=(
     --packing true \
     --dataset qwen35_2b9b_sft \
     --dataset_dir configs/sft \
-    --template qwen3 \
+    --template "${SFT_TEMPLATE}" \
     --cutoff_len "${SFT_CUTOFF_LEN}" \
     --overwrite_cache true \
     --preprocessing_num_workers 8 \
