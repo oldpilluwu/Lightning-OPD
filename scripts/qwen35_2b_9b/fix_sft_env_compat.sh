@@ -65,6 +65,11 @@ if transformers_utils_init.exists():
         utils_text += r'''
 
 # qwen35_sft_compat_utils
+import importlib.util as _qwen35_importlib_util
+
+def _qwen35_has_package(name):
+    return _qwen35_importlib_util.find_spec(name) is not None
+
 def is_torch_sdpa_available():
     try:
         import torch
@@ -81,6 +86,36 @@ except NameError:
             return True
         except Exception:
             return False
+
+try:
+    is_safetensors_available
+except NameError:
+    def is_safetensors_available():
+        return _qwen35_has_package("safetensors")
+
+try:
+    is_tensorboard_available
+except NameError:
+    def is_tensorboard_available():
+        return _qwen35_has_package("tensorboard") or _qwen35_has_package("tensorboardX")
+
+try:
+    is_wandb_available
+except NameError:
+    def is_wandb_available():
+        return _qwen35_has_package("wandb")
+
+try:
+    is_datasets_available
+except NameError:
+    def is_datasets_available():
+        return _qwen35_has_package("datasets")
+
+try:
+    is_peft_available
+except NameError:
+    def is_peft_available():
+        return _qwen35_has_package("peft")
 '''
         transformers_utils_init.write_text(utils_text)
         print(f"patched {transformers_utils_init}")
@@ -120,19 +155,52 @@ except ImportError:
             return False"""
 if attention.exists():
     attention_text = attention.read_text()
-    attention_text = attention_text.replace(
-        "try:\nfrom transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available",
-        new_attention_import,
-    )
-    attention_text = attention_text.replace(
-        "try:\ntry:\n    from transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available",
-        new_attention_import,
-    )
-    attention_text, count = re.subn(
-        r"(?m)^from transformers\.utils import is_flash_attn_2_available, is_torch_sdpa_available\s*$",
-        new_attention_import,
-        attention_text,
-    )
+    target = "from transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available"
+    cleanup = []
+    lines = attention_text.splitlines()
+    i = 0
+    inserted = False
+    while i < len(lines):
+        stripped = lines[i].strip()
+        lookahead = "\n".join(lines[i : min(len(lines), i + 16)])
+        if (
+            stripped == "try:"
+            and (
+                target in lookahead
+                or "def is_flash_attn_2_available():" in lookahead
+                or "def is_torch_sdpa_available():" in lookahead
+            )
+        ):
+            while i < len(lines):
+                current = lines[i].strip()
+                if current.startswith(("def configure_", "def print_", "logger =", "ATTN")):
+                    break
+                if current.startswith("from ") and target not in current and "flash_attn" not in current:
+                    break
+                i += 1
+            if not inserted:
+                cleanup.extend(new_attention_import.splitlines())
+                inserted = True
+            continue
+        if stripped == target:
+            if cleanup and cleanup[-1].strip() == "try:":
+                cleanup.pop()
+            if not inserted:
+                cleanup.extend(new_attention_import.splitlines())
+                inserted = True
+            i += 1
+            continue
+        cleanup.append(lines[i])
+        i += 1
+
+    attention_text = "\n".join(cleanup) + "\n"
+    count = 1 if inserted else 0
+    if not inserted:
+        attention_text, count = re.subn(
+            r"(?m)^from transformers\.utils import is_flash_attn_2_available, is_torch_sdpa_available\s*$",
+            new_attention_import,
+            attention_text,
+        )
     attention.write_text(attention_text)
     if count:
         print(f"patched {attention}")
@@ -204,6 +272,34 @@ try:
             return importlib.util.find_spec("flash_attn") is not None
         _tf_utils.is_flash_attn_2_available = is_flash_attn_2_available
 
+    if not hasattr(_tf_utils, "is_safetensors_available"):
+        def is_safetensors_available():
+            return importlib.util.find_spec("safetensors") is not None
+        _tf_utils.is_safetensors_available = is_safetensors_available
+
+    if not hasattr(_tf_utils, "is_tensorboard_available"):
+        def is_tensorboard_available():
+            return (
+                importlib.util.find_spec("tensorboard") is not None
+                or importlib.util.find_spec("tensorboardX") is not None
+            )
+        _tf_utils.is_tensorboard_available = is_tensorboard_available
+
+    if not hasattr(_tf_utils, "is_wandb_available"):
+        def is_wandb_available():
+            return importlib.util.find_spec("wandb") is not None
+        _tf_utils.is_wandb_available = is_wandb_available
+
+    if not hasattr(_tf_utils, "is_datasets_available"):
+        def is_datasets_available():
+            return importlib.util.find_spec("datasets") is not None
+        _tf_utils.is_datasets_available = is_datasets_available
+
+    if not hasattr(_tf_utils, "is_peft_available"):
+        def is_peft_available():
+            return importlib.util.find_spec("peft") is not None
+        _tf_utils.is_peft_available = is_peft_available
+
     if not hasattr(_tf_utils, "is_jieba_available"):
         def is_jieba_available():
             return importlib.util.find_spec("jieba") is not None
@@ -223,7 +319,7 @@ PY
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" python - <<'PY'
 import transformers
 from transformers import Qwen3_5ForCausalLM
-from transformers.utils import is_torch_sdpa_available
+from transformers.utils import is_safetensors_available, is_torch_sdpa_available
 from trl import AutoModelForCausalLMWithValueHead
 import llamafactory
 from llamafactory.model.loader import AutoModelForVision2Seq
@@ -231,5 +327,6 @@ print("transformers", transformers.__version__)
 print("qwen3_5 class", Qwen3_5ForCausalLM.__name__)
 print("vision fallback", AutoModelForVision2Seq.__name__)
 print("sdpa available", is_torch_sdpa_available())
+print("safetensors available", is_safetensors_available())
 print("imports ok")
 PY
