@@ -26,13 +26,21 @@ NUM_NODES="${NUM_NODES:-4}"
 NUM_GPUS="${NUM_GPUS:-8}"
 MASTER_ADDR="${MASTER_ADDR:-localhost}"
 
-torchrun \
-    --nnodes "${NUM_NODES}" \
-    --nproc_per_node="${NUM_GPUS}" \
-    --rdzv_id $RANDOM \
-    --rdzv_backend c10d \
-    --rdzv_endpoint "${MASTER_ADDR}:29500" \
-    -m llamafactory.cli.train \
+if command -v llamafactory-cli >/dev/null 2>&1; then
+    LLAMAFACTORY_TRAIN=(llamafactory-cli train)
+else
+    LLAMAFACTORY_TRAIN=(python -m llamafactory.cli train)
+fi
+
+if [[ "${NUM_NODES}" != "1" || "${NUM_GPUS}" != "1" ]]; then
+    export FORCE_TORCHRUN="${FORCE_TORCHRUN:-1}"
+    export NNODES="${NUM_NODES}"
+    export NPROC_PER_NODE="${NUM_GPUS}"
+    export MASTER_ADDR="${MASTER_ADDR}"
+    export MASTER_PORT="${MASTER_PORT:-29500}"
+fi
+
+"${LLAMAFACTORY_TRAIN[@]}" \
     "configs/sft/${CONFIG_YAML}" \
     "dataset_dir=configs/sft" \
     "output_dir=${OUTPUT_DIR}"

@@ -13,13 +13,21 @@ SFT_GRAD_ACCUM="${SFT_GRAD_ACCUM:-8}"
 
 mkdir -p "${SFT_OUTPUT_DIR}"
 
-torchrun \
-    --nnodes "${NUM_NODES}" \
-    --nproc_per_node="${NUM_GPUS}" \
-    --rdzv_id "${RANDOM}" \
-    --rdzv_backend c10d \
-    --rdzv_endpoint "${MASTER_ADDR}:29500" \
-    -m llamafactory.cli.train \
+if command -v llamafactory-cli >/dev/null 2>&1; then
+    LLAMAFACTORY_TRAIN=(llamafactory-cli train)
+else
+    LLAMAFACTORY_TRAIN=(python -m llamafactory.cli train)
+fi
+
+if [[ "${NUM_NODES}" != "1" || "${NUM_GPUS}" != "1" ]]; then
+    export FORCE_TORCHRUN="${FORCE_TORCHRUN:-1}"
+    export NNODES="${NUM_NODES}"
+    export NPROC_PER_NODE="${NUM_GPUS}"
+    export MASTER_ADDR="${MASTER_ADDR}"
+    export MASTER_PORT="${MASTER_PORT:-29500}"
+fi
+
+"${LLAMAFACTORY_TRAIN[@]}" \
     configs/sft/qwen35-2b-base-open-thoughts3-qwen35-9b.yaml \
     "dataset_dir=configs/sft" \
     "model_name_or_path=${STUDENT_BASE}" \
