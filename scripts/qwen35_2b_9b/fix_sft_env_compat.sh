@@ -40,6 +40,21 @@ Transformers LLaMA classes removed in newer Transformers. Qwen SFT does not use
 these classes, but the import happens at package import time.
 """
 try:
+    import transformers as _tf
+
+    if not hasattr(_tf, "AutoModelForVision2Seq"):
+        for _name in (
+            "AutoModelForImageTextToText",
+            "AutoModelForConditionalGeneration",
+            "AutoModelForCausalLM",
+        ):
+            if hasattr(_tf, _name):
+                _tf.AutoModelForVision2Seq = getattr(_tf, _name)
+                break
+except Exception:
+    pass
+
+try:
     import transformers.models.llama.modeling_llama as _llama
 
     if not hasattr(_llama, "LlamaFlashAttention2") and hasattr(_llama, "LlamaAttention"):
