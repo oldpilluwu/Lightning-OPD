@@ -3,11 +3,18 @@
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 SFT_CHECKPOINT="$(find_latest_sft_checkpoint)"
+VLLM_CHECKPOINT="${SFT_VLLM_CHECKPOINT:-${SFT_VLLM_DIR}/$(basename "${SFT_CHECKPOINT}")}"
 RAW_DIR="${EXP_DIR}/rollouts/raw"
 rm -rf "${RAW_DIR}"
 mkdir -p "${RAW_DIR}" "$(dirname "${ROLLOUT_DATA}")"
 
-SFT_CHECKPOINT="${SFT_CHECKPOINT}" \
+python scripts/qwen35_2b_9b/prepare_vllm_checkpoint.py \
+    --sft-checkpoint "${SFT_CHECKPOINT}" \
+    --base-model "${STUDENT_BASE}" \
+    --output-dir "${VLLM_CHECKPOINT}" \
+    --force
+
+SFT_CHECKPOINT="${VLLM_CHECKPOINT}" \
 OPD_PROMPTS="${OPD_PROMPTS}" \
 OUTPUT_DIR="${RAW_DIR}" \
 NUM_GPUS="${NUM_GPUS}" \
@@ -28,4 +35,5 @@ python data_curation/merge.py \
     --output "${ROLLOUT_DATA}"
 
 echo "SFT checkpoint: ${SFT_CHECKPOINT}"
+echo "vLLM checkpoint: ${VLLM_CHECKPOINT}"
 echo "Rollout parquet: ${ROLLOUT_DATA}"
