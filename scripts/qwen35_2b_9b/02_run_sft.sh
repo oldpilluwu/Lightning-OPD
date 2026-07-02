@@ -10,6 +10,7 @@ SFT_SAVE_TOTAL_LIMIT="${SFT_SAVE_TOTAL_LIMIT:-3}"
 SFT_CUTOFF_LEN="${SFT_CUTOFF_LEN:-8192}"
 SFT_BATCH_SIZE="${SFT_BATCH_SIZE:-1}"
 SFT_GRAD_ACCUM="${SFT_GRAD_ACCUM:-8}"
+SFT_DEEPSPEED_CONFIG="${SFT_DEEPSPEED_CONFIG:-}"
 
 mkdir -p "${SFT_OUTPUT_DIR}"
 
@@ -27,16 +28,46 @@ if [[ "${NUM_NODES}" != "1" || "${NUM_GPUS}" != "1" ]]; then
     export MASTER_PORT="${MASTER_PORT:-29500}"
 fi
 
-"${LLAMAFACTORY_TRAIN[@]}" \
-    configs/sft/qwen35-2b-base-open-thoughts3-qwen35-9b.yaml \
-    "dataset_dir=configs/sft" \
-    "model_name_or_path=${STUDENT_BASE}" \
-    "output_dir=${SFT_OUTPUT_DIR}" \
-    "max_steps=${SFT_MAX_STEPS}" \
-    "save_steps=${SFT_SAVE_STEPS}" \
-    "save_total_limit=${SFT_SAVE_TOTAL_LIMIT}" \
-    "cutoff_len=${SFT_CUTOFF_LEN}" \
-    "per_device_train_batch_size=${SFT_BATCH_SIZE}" \
-    "gradient_accumulation_steps=${SFT_GRAD_ACCUM}"
+SFT_ARGS=(
+    --model_name_or_path "${STUDENT_BASE}" \
+    --trust_remote_code true \
+    --stage sft \
+    --do_train true \
+    --finetuning_type full \
+    --enable_liger_kernel true \
+    --packing true \
+    --dataset qwen35_2b9b_sft \
+    --dataset_dir configs/sft \
+    --template qwen3 \
+    --cutoff_len "${SFT_CUTOFF_LEN}" \
+    --overwrite_cache true \
+    --preprocessing_num_workers 8 \
+    --dataloader_persistent_workers true \
+    --dataloader_pin_memory true \
+    --dataloader_num_workers 2 \
+    --output_dir "${SFT_OUTPUT_DIR}" \
+    --logging_steps 1 \
+    --save_steps "${SFT_SAVE_STEPS}" \
+    --save_total_limit "${SFT_SAVE_TOTAL_LIMIT}" \
+    --plot_loss true \
+    --overwrite_output_dir false \
+    --save_only_model false \
+    --report_to none \
+    --run_name qwen35-2b-base-open-thoughts3-qwen35-9b \
+    --per_device_train_batch_size "${SFT_BATCH_SIZE}" \
+    --gradient_accumulation_steps "${SFT_GRAD_ACCUM}" \
+    --learning_rate 8e-5 \
+    --max_steps "${SFT_MAX_STEPS}" \
+    --lr_scheduler_type cosine \
+    --warmup_ratio 0.1 \
+    --bf16 true \
+    --ddp_timeout 180000000
+)
+
+if [[ -n "${SFT_DEEPSPEED_CONFIG}" ]]; then
+    SFT_ARGS+=(--deepspeed "${SFT_DEEPSPEED_CONFIG}")
+fi
+
+"${LLAMAFACTORY_TRAIN[@]}" "${SFT_ARGS[@]}"
 
 echo "SFT output: ${SFT_OUTPUT_DIR}"
