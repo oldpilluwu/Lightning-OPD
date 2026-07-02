@@ -32,6 +32,7 @@ from pathlib import Path
 
 site_packages = Path(site.getsitepackages()[0])
 transformers_init = site_packages / "transformers" / "__init__.py"
+transformers_utils_init = site_packages / "transformers" / "utils" / "__init__.py"
 alias_marker = "# qwen35_sft_compat_autovision2seq"
 if transformers_init.exists():
     init_text = transformers_init.read_text()
@@ -56,6 +57,33 @@ except NameError:
         transformers_init.write_text(init_text)
         print(f"patched {transformers_init}")
 
+utils_marker = "# qwen35_sft_compat_utils"
+if transformers_utils_init.exists():
+    utils_text = transformers_utils_init.read_text()
+    if utils_marker not in utils_text:
+        utils_text += r'''
+
+# qwen35_sft_compat_utils
+def is_torch_sdpa_available():
+    try:
+        import torch
+        return hasattr(torch.nn.functional, "scaled_dot_product_attention")
+    except Exception:
+        return False
+
+try:
+    is_flash_attn_2_available
+except NameError:
+    def is_flash_attn_2_available():
+        try:
+            import flash_attn  # noqa: F401
+            return True
+        except Exception:
+            return False
+'''
+        transformers_utils_init.write_text(utils_text)
+        print(f"patched {transformers_utils_init}")
+
 loader = site_packages / "llamafactory" / "model" / "loader.py"
 old_import = "from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq, AutoProcessor, AutoTokenizer"
 new_import = """from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, AutoTokenizer
@@ -74,6 +102,26 @@ if loader.exists():
     if old_import in loader_text:
         loader.write_text(loader_text.replace(old_import, new_import))
         print(f"patched {loader}")
+
+attention = site_packages / "llamafactory" / "model" / "model_utils" / "attention.py"
+old_attention_import = "from transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available"
+new_attention_import = """try:
+    from transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available
+except ImportError:
+    import importlib.util
+    def is_flash_attn_2_available():
+        return importlib.util.find_spec("flash_attn") is not None
+    def is_torch_sdpa_available():
+        try:
+            import torch
+            return hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        except Exception:
+            return False"""
+if attention.exists():
+    attention_text = attention.read_text()
+    if old_attention_import in attention_text:
+        attention.write_text(attention_text.replace(old_attention_import, new_attention_import))
+        print(f"patched {attention}")
 
 shim = site_packages / "sitecustomize.py"
 body = r'''
@@ -112,6 +160,20 @@ try:
     import importlib.util
     import transformers.utils as _tf_utils
 
+    if not hasattr(_tf_utils, "is_torch_sdpa_available"):
+        def is_torch_sdpa_available():
+            try:
+                import torch
+                return hasattr(torch.nn.functional, "scaled_dot_product_attention")
+            except Exception:
+                return False
+        _tf_utils.is_torch_sdpa_available = is_torch_sdpa_available
+
+    if not hasattr(_tf_utils, "is_flash_attn_2_available"):
+        def is_flash_attn_2_available():
+            return importlib.util.find_spec("flash_attn") is not None
+        _tf_utils.is_flash_attn_2_available = is_flash_attn_2_available
+
     if not hasattr(_tf_utils, "is_jieba_available"):
         def is_jieba_available():
             return importlib.util.find_spec("jieba") is not None
@@ -131,11 +193,13 @@ PY
 "${CONDA_BIN}" run --no-capture-output -n "${SFT_ENV}" python - <<'PY'
 import transformers
 from transformers import Qwen3_5ForCausalLM
+from transformers.utils import is_torch_sdpa_available
 from trl import AutoModelForCausalLMWithValueHead
 import llamafactory
 from llamafactory.model.loader import AutoModelForVision2Seq
 print("transformers", transformers.__version__)
 print("qwen3_5 class", Qwen3_5ForCausalLM.__name__)
 print("vision fallback", AutoModelForVision2Seq.__name__)
+print("sdpa available", is_torch_sdpa_available())
 print("imports ok")
 PY
