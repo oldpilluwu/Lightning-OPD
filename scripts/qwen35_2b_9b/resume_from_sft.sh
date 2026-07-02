@@ -19,19 +19,11 @@ CURATION_ENV="${CURATION_ENV:-qwen35-curation}"
 SFT_ENV="${SFT_ENV:-qwen35-sft}"
 TRAIN_ENV="${TRAIN_ENV:-qwen35-train}"
 
-RUN_ID="${RUN_ID:-resume_$(date +%Y%m%d_%H%M%S)}"
+RUN_ID="${RUN_ID:-resume_sft_$(date +%Y%m%d_%H%M%S)}"
 LOG_DIR="${LOG_DIR:-logs/qwen35_2b_9b/${RUN_ID}}"
 mkdir -p "${LOG_DIR}"
 
 export RUN_ID LOG_DIR
-export RESUME=1
-export BATCH_SIZE="${BATCH_SIZE:-16}"
-export MAX_TOKENS="${MAX_TOKENS:-4096}"
-export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
-export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-8192}"
-export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-32}"
-export VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-32768}"
-export VLLM_DTYPE="${VLLM_DTYPE:-bfloat16}"
 export USE_TENSORBOARD="${USE_TENSORBOARD:-1}"
 export TENSORBOARD_DIR="${TENSORBOARD_DIR:-${LOG_DIR}/tensorboard}"
 export LIGHTNING_OPD_OUTPUT_DIR="${LIGHTNING_OPD_OUTPUT_DIR:-checkpoints/qwen35_2b_9b/lightning_opd_fsdp_${RUN_ID}}"
@@ -80,35 +72,24 @@ run_sft_with_monitor() {
 {
     echo "run_id=${RUN_ID}"
     echo "log_dir=${LOG_DIR}"
-    echo "resume_from=sft_generation"
-    echo "curation_env=${CURATION_ENV}"
-    echo "sft_env=${SFT_ENV}"
-    echo "train_env=${TRAIN_ENV}"
-    echo "raw_dir=${EXP_DIR}/sft_data/raw"
-    echo "resume_checkpoint_dir=checkpoints"
-    echo "batch_size=${BATCH_SIZE}"
-    echo "max_tokens=${MAX_TOKENS}"
-    echo "vllm_gpu_memory_utilization=${VLLM_GPU_MEMORY_UTILIZATION}"
-    echo "vllm_max_model_len=${VLLM_MAX_MODEL_LEN}"
-    echo "vllm_max_num_seqs=${VLLM_MAX_NUM_SEQS}"
-    echo "vllm_max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "resume_from=sft"
+    echo "sft_data=${SFT_DATA}"
+    echo "sft_probe_precomputed=${SFT_PROBE_PRECOMPUTED}"
     echo "sft_probe_metrics_dir=${SFT_PROBE_METRICS_DIR}"
     echo "lightning_opd_output_dir=${LIGHTNING_OPD_OUTPUT_DIR}"
     echo "hf_export_dir=${HF_EXPORT_DIR}"
 } | tee "${LOG_DIR}/run.env"
 
-if [[ ! -d "${EXP_DIR}/sft_data/raw" ]]; then
-    echo "Missing raw SFT output dir: ${EXP_DIR}/sft_data/raw" >&2
-    echo "This resume script expects stage 01 to have started already." >&2
+if [[ ! -f "${SFT_DATA}" ]]; then
+    echo "Missing SFT train parquet: ${SFT_DATA}" >&2
     exit 1
 fi
 
-if ! compgen -G "checkpoints/rank*.pkl" > /dev/null; then
-    echo "Warning: no checkpoints/rank*.pkl found. Stage 01 may restart from the beginning of its raw dir."
+if [[ ! -f "${SFT_PROBE_PRECOMPUTED}" ]]; then
+    echo "Missing SFT probe precomputed parquet: ${SFT_PROBE_PRECOMPUTED}" >&2
+    exit 1
 fi
 
-run_stage "${CURATION_ENV}" "01_generate_sft_data_resume" "bash scripts/qwen35_2b_9b/01_generate_sft_data.sh"
-run_stage "${TRAIN_ENV}" "01b_precompute_sft_probe_logprobs" "bash scripts/qwen35_2b_9b/01b_precompute_sft_probe_logprobs.sh"
 run_sft_with_monitor
 
 if [[ -f "${SFT_PROBE_METRICS_DIR}/selected_checkpoint.txt" ]]; then
@@ -124,5 +105,5 @@ run_stage "${TRAIN_ENV}" "07_export_latest_hf" "bash scripts/qwen35_2b_9b/07_exp
 run_stage "${CURATION_ENV}" "08_eval_sft" "EVAL_MODEL=\"\$(bash scripts/qwen35_2b_9b/print_latest_sft_checkpoint.sh)\" EVAL_OUTPUT='${LOG_DIR}/eval_sft.json' bash scripts/qwen35_2b_9b/08_eval_math.sh"
 run_stage "${CURATION_ENV}" "08_eval_final" "EVAL_MODEL='${HF_EXPORT_DIR}' EVAL_OUTPUT='${LOG_DIR}/eval_final.json' bash scripts/qwen35_2b_9b/08_eval_math.sh"
 
-echo "Resume pipeline done."
+echo "Resume-from-SFT pipeline done."
 echo "Logs: ${LOG_DIR}"

@@ -37,6 +37,12 @@ pkill -f "data_curation/pipeline.py"
 BATCH_SIZE=16 MAX_TOKENS=2048 bash scripts/qwen35_2b_9b/resume_from_sft_generation.sh
 ```
 
+If curation and SFT-probe precompute already completed, but SFT failed, resume from SFT:
+
+```bash
+bash scripts/qwen35_2b_9b/resume_from_sft.sh
+```
+
 Outputs go under:
 
 ```text

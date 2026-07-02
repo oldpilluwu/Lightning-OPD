@@ -90,13 +90,13 @@ create_env "${TRAIN_ENV}"
 echo "Installing curation env..."
 run_in_env "${CURATION_ENV}" "curation_00_pip" "python -m pip install --upgrade pip"
 pip_install "${CURATION_ENV}" "curation_01_core" \
-    "transformers>=4.57.0" "pyarrow" "pandas" "tqdm" "datasets" "accelerate" "huggingface_hub[cli]"
+    "transformers>=4.57.0,<5.0.0" "pyarrow" "pandas" "tqdm" "datasets" "accelerate" "huggingface_hub[cli]"
 pip_install "${CURATION_ENV}" "curation_02_vllm" "vllm"
 
 echo "Installing SFT env..."
 run_in_env "${SFT_ENV}" "sft_00_pip" "python -m pip install --upgrade pip"
 pip_install "${SFT_ENV}" "sft_01_core" \
-    "torch" "transformers>=4.57.0" "datasets" "accelerate" "pandas" "pyarrow" "tqdm" "wandb" "huggingface_hub[cli]"
+    "torch" "transformers>=4.57.0,<5.0.0" "datasets" "accelerate" "pandas" "pyarrow" "tqdm" "wandb" "huggingface_hub[cli]"
 pip_install "${SFT_ENV}" "sft_02_training" "llamafactory" "deepspeed" "liger-kernel"
 
 echo "Installing training/sglang env..."
@@ -104,7 +104,7 @@ run_in_env "${TRAIN_ENV}" "train_00_pip" "python -m pip install --upgrade pip"
 run_in_env "${TRAIN_ENV}" "train_01_requirements" \
     "python -m pip install --progress-bar on --retries 5 --timeout 120 -r requirements.txt"
 pip_install "${TRAIN_ENV}" "train_02_core" \
-    "transformers>=4.57.0" "tensorboard" "aiohttp" "pandas" "pyarrow" "tqdm" "huggingface_hub[cli]"
+    "transformers>=4.57.0,<5.0.0" "tensorboard" "aiohttp" "pandas" "pyarrow" "tqdm" "huggingface_hub[cli]"
 pip_install "${TRAIN_ENV}" "train_03_vllm" "vllm"
 pip_install "${TRAIN_ENV}" "train_04_sglang" "sglang[all]"
 run_in_env "${TRAIN_ENV}" "train_05_editable" "python -m pip install -e ."
