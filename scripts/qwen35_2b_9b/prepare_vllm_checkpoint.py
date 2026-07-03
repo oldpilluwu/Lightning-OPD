@@ -48,6 +48,8 @@ BASE_WEIGHT_ALLOW_PATTERNS = [
     "model.safetensors.index.json",
 ]
 
+QWEN_CHAT_TEMPLATE = """{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n' }}{% elif message['role'] == 'user' %}{{ '<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n' }}{% elif message['role'] == 'assistant' %}{{ '<|im_start|>assistant\\n' + message['content'] + '<|im_end|>\\n' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""
+
 
 def copy_tree_files(src: Path, dst: Path, *, skip_weights: bool) -> None:
     for path in src.rglob("*"):
@@ -111,6 +113,18 @@ def read_config(path: Path) -> dict:
         return json.load(f)
 
 
+def ensure_chat_template(output_dir: Path) -> None:
+    tokenizer_config_path = output_dir / "tokenizer_config.json"
+    if tokenizer_config_path.exists():
+        tokenizer_config = read_config(tokenizer_config_path)
+    else:
+        tokenizer_config = {}
+
+    if not tokenizer_config.get("chat_template"):
+        tokenizer_config["chat_template"] = QWEN_CHAT_TEMPLATE
+        tokenizer_config_path.write_text(json.dumps(tokenizer_config, indent=2, sort_keys=True) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sft-checkpoint", required=True)
@@ -152,8 +166,11 @@ def main() -> None:
         if src.exists():
             shutil.copy2(src, output_dir / name)
 
+    ensure_chat_template(output_dir)
+
     base_cfg = read_config(output_dir / "config.json")
     sft_cfg = read_config(sft_checkpoint / "config.json")
+    tokenizer_cfg = read_config(output_dir / "tokenizer_config.json")
     report = {
         "base_model": args.base_model,
         "sft_checkpoint": str(sft_checkpoint),
@@ -163,6 +180,7 @@ def main() -> None:
         "sft_model_type": sft_cfg.get("model_type"),
         "sft_architectures": sft_cfg.get("architectures"),
         "base_visual_tensors_added": visual_weights,
+        "has_chat_template": bool(tokenizer_cfg.get("chat_template")),
         "weight_files": sorted(path.name for path in output_dir.iterdir() if path.suffix in WEIGHT_SUFFIXES),
     }
     (output_dir / "vllm_prepare_report.json").write_text(json.dumps(report, indent=2) + "\n")
