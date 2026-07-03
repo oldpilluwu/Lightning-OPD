@@ -286,6 +286,18 @@ run_in_env() {
   deactivate_env "${env_name}"
 }
 
+# Guarantee pip exists in the given env. Some conda-forge python builds (or
+# envs created before pip was requested) ship without pip, which breaks
+# `python -m pip`. Safe to call on an already-activated env.
+ensure_pip_in_env() {
+  local env_name="$1"
+  if python -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "[env] pip missing in ${env_name}; bootstrapping via conda"
+  conda install -y -n "${env_name}" --override-channels -c "${CONDA_CHANNEL}" pip
+}
+
 setup_conda_env() {
   local env_name="$1"
   shift
@@ -296,10 +308,11 @@ setup_conda_env() {
   ensure_conda
   if ! conda_env_exists "${env_name}"; then
     echo "[env] Creating conda env ${env_name} (python=${ENV_PYTHON_VERSION})"
-    conda create -y -n "${env_name}" "python=${ENV_PYTHON_VERSION}" \
+    conda create -y -n "${env_name}" "python=${ENV_PYTHON_VERSION}" pip \
       --override-channels -c "${CONDA_CHANNEL}"
   fi
   activate_env "${env_name}"
+  ensure_pip_in_env "${env_name}"
   echo "[env] Installing into ${env_name}: $*"
   python -m pip install "$@"
   deactivate_env "${env_name}"
@@ -318,10 +331,13 @@ setup_opd_env() {
     ensure_conda
     if ! conda_env_exists "${OPD_ENV}"; then
       echo "[env] Creating conda env ${OPD_ENV} (python=${ENV_PYTHON_VERSION})"
-      conda create -y -n "${OPD_ENV}" "python=${ENV_PYTHON_VERSION}" \
+      conda create -y -n "${OPD_ENV}" "python=${ENV_PYTHON_VERSION}" pip \
         --override-channels -c "${CONDA_CHANNEL}"
     fi
-    run_in_env "${OPD_ENV}" python -m pip install -e .
+    activate_env "${OPD_ENV}"
+    ensure_pip_in_env "${OPD_ENV}"
+    python -m pip install -e .
+    deactivate_env "${OPD_ENV}"
   else
     # Official route: the repo docker container (sglang/Megatron preinstalled);
     # only the repo itself needs installing.
