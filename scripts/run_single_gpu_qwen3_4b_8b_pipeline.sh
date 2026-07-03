@@ -77,6 +77,7 @@ OPD_SAVE_DIR="${OPD_SAVE_DIR:-${RUN_DIR}/checkpoints/lightning_opd_single_gpu}"
 
 FORCE="${FORCE:-0}"
 SKIP_OPD="${SKIP_OPD:-0}"
+AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-1}"
 
 SFT_PROMPTS="${RUN_DIR}/data/prompts/openthoughts3_${SFT_SAMPLES}.jsonl"
 OPD_PROMPTS="${RUN_DIR}/data/prompts/opd_prompts_${OPD_SAMPLES}.jsonl"
@@ -102,7 +103,34 @@ run_stage() {
   date -Is > "${DONE_DIR}/${marker}"
 }
 
+ensure_prompt_prep_deps() {
+  if python - <<'PY'
+import importlib.util
+import sys
+
+missing = [
+    pkg for pkg in ("datasets", "pandas", "pyarrow", "tqdm", "yaml")
+    if importlib.util.find_spec(pkg) is None
+]
+if missing:
+    print(" ".join(missing))
+    sys.exit(1)
+PY
+    return 0
+  fi
+
+  if [[ "${AUTO_INSTALL_DEPS}" != "1" ]]; then
+    echo "Missing prompt-prep Python dependencies. Install them with:" >&2
+    echo "  python -m pip install datasets pandas pyarrow tqdm pyyaml" >&2
+    exit 1
+  fi
+
+  echo "[deps] Installing prompt-prep dependencies: datasets pandas pyarrow tqdm pyyaml"
+  python -m pip install datasets pandas pyarrow tqdm pyyaml
+}
+
 prepare_sft_prompts() {
+  ensure_prompt_prep_deps
   mkdir -p "$(dirname "${SFT_PROMPTS}")"
   if [[ -n "${SFT_PROMPTS_SRC}" ]]; then
     python - "${SFT_PROMPTS_SRC}" "${SFT_PROMPTS}" "${SFT_SAMPLES}" "${SEED}" <<'PY'
