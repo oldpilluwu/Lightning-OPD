@@ -36,6 +36,9 @@
 #   Each env is created and populated once (marker-gated), activated before
 #   its stage and deactivated afterwards. Set USE_CONDA=0 to run everything
 #   in the current environment (e.g. inside a single mega-env or container).
+#   If conda itself is missing, Miniconda is auto-installed to
+#   CONDA_INSTALL_DIR (default ~/miniconda3); set AUTO_INSTALL_CONDA=0 to
+#   disable and error out instead.
 #
 # Example:
 #   bash scripts/run_single_gpu_qwen3_4b_8b_pipeline.sh
@@ -126,6 +129,10 @@ OPD_ENV="${OPD_ENV:-}"
 ENV_PYTHON_VERSION="${ENV_PYTHON_VERSION:-3.10}"
 # conda-forge avoids the interactive Anaconda default-channel ToS prompt.
 CONDA_CHANNEL="${CONDA_CHANNEL:-conda-forge}"
+# Auto-install Miniconda when conda is missing (USE_CONDA=1 only). Set to 0 to
+# error out instead. CONDA_INSTALL_DIR is where a fresh install lands.
+AUTO_INSTALL_CONDA="${AUTO_INSTALL_CONDA:-1}"
+CONDA_INSTALL_DIR="${CONDA_INSTALL_DIR:-${HOME}/miniconda3}"
 CURATION_PACKAGES=(vllm transformers pyarrow pandas tqdm datasets pyyaml "huggingface_hub[cli]")
 SFT_PACKAGES=(llamafactory torch transformers datasets pandas pyyaml liger-kernel)
 
@@ -161,19 +168,81 @@ run_stage() {
 
 CONDA_HOOKED=0
 
+# Detect an already-installed conda that is not yet on PATH (common when a
+# previous run installed it but the shell was not reopened).
+find_conda_base() {
+  if command -v conda >/dev/null 2>&1; then
+    conda info --base
+    return 0
+  fi
+  local candidate
+  for candidate in "${CONDA_INSTALL_DIR}" "${HOME}/miniconda3" "${HOME}/anaconda3" \
+                   "/opt/conda" "${HOME}/miniforge3"; do
+    if [[ -x "${candidate}/bin/conda" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_miniconda() {
+  local target="${CONDA_INSTALL_DIR}"
+  local os arch installer_os installer_arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "${os}" in
+    Linux)  installer_os="Linux" ;;
+    Darwin) installer_os="MacOSX" ;;
+    *) echo "Unsupported OS for Miniconda auto-install: ${os}" >&2; exit 1 ;;
+  esac
+  case "${arch}" in
+    x86_64|amd64)  installer_arch="x86_64" ;;
+    aarch64|arm64) installer_arch="aarch64" ;;
+    *) echo "Unsupported arch for Miniconda auto-install: ${arch}" >&2; exit 1 ;;
+  esac
+  # Apple Silicon uses arm64 in Miniconda filenames, not aarch64.
+  [[ "${installer_os}" == "MacOSX" && "${installer_arch}" == "aarch64" ]] && installer_arch="arm64"
+
+  local url="https://repo.anaconda.com/miniconda/Miniconda3-latest-${installer_os}-${installer_arch}.sh"
+  local installer="${RUN_DIR}/miniconda_installer.sh"
+  echo "[env] conda not found. Installing Miniconda to ${target}"
+  echo "[env] Downloading ${url}"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "${url}" -o "${installer}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "${url}" -O "${installer}"
+  else
+    echo "Neither curl nor wget is available to download Miniconda." >&2
+    exit 1
+  fi
+  # -b batch (no prompts), -p prefix. Refuses to clobber an existing dir.
+  bash "${installer}" -b -p "${target}"
+  rm -f "${installer}"
+}
+
 ensure_conda() {
   if (( CONDA_HOOKED )); then
     return 0
   fi
-  if ! command -v conda >/dev/null 2>&1; then
-    echo "conda not found. Install Miniconda/Anaconda, or set USE_CONDA=0 to" >&2
-    echo "run every stage in the current environment." >&2
-    exit 1
+
+  local base
+  if ! base="$(find_conda_base)"; then
+    if [[ "${AUTO_INSTALL_CONDA}" == "1" ]]; then
+      install_miniconda
+      base="${CONDA_INSTALL_DIR}"
+    else
+      echo "conda not found. Install Miniconda/Anaconda (or set" >&2
+      echo "AUTO_INSTALL_CONDA=1), or set USE_CONDA=0 to run every stage in" >&2
+      echo "the current environment." >&2
+      exit 1
+    fi
   fi
+
   # conda's shell hooks reference unset variables; relax nounset around them.
   set +u
   # shellcheck disable=SC1091
-  source "$(conda info --base)/etc/profile.d/conda.sh"
+  source "${base}/etc/profile.d/conda.sh"
   set -u
   CONDA_HOOKED=1
 }
