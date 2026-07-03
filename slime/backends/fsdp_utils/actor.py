@@ -1114,7 +1114,12 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
     layer_cls_to_wrap = model._no_split_modules
-    assert len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
+    if isinstance(layer_cls_to_wrap, set):
+        layer_cls_to_wrap = sorted(layer_cls_to_wrap)
+    else:
+        layer_cls_to_wrap = list(layer_cls_to_wrap or [])
+    if not layer_cls_to_wrap or layer_cls_to_wrap[0] is None:
+        raise ValueError(f"Could not determine FSDP layer classes from model._no_split_modules={model._no_split_modules}")
 
     modules = [
         module
