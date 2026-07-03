@@ -558,6 +558,40 @@ class FSDPTrainRayActor(TrainRayActor):
                 torch.tensor([rollout_data["rewards"][i]] * rollout_data["response_lengths"][i])
                 for i in range(len(rollout_data["rewards"]))
             ]
+        elif self.args.advantage_estimator == "on_policy_distillation":
+            teacher_log_probs = rollout_data.get("teacher_log_probs")
+            if teacher_log_probs is None:
+                raise ValueError("teacher_log_probs is required for on_policy_distillation")
+
+            student_log_probs_key = "rollout_log_probs" if "rollout_log_probs" in rollout_data else "log_probs"
+            student_log_probs = rollout_data.get(student_log_probs_key)
+            if student_log_probs is None:
+                raise ValueError("rollout_log_probs or log_probs is required for on_policy_distillation")
+
+            if len(teacher_log_probs) != len(student_log_probs):
+                raise ValueError(
+                    "Mismatched OPD batch sizes: "
+                    f"teacher={len(teacher_log_probs)}, student={len(student_log_probs)}"
+                )
+
+            advantages = []
+            response_lengths = rollout_data["response_lengths"]
+            for idx, (teacher_log_prob, student_log_prob, response_length) in enumerate(
+                zip(teacher_log_probs, student_log_probs, response_lengths, strict=False)
+            ):
+                teacher_log_prob = torch.as_tensor(teacher_log_prob, dtype=torch.float32)[-response_length:]
+                student_log_prob = torch.as_tensor(student_log_prob, dtype=torch.float32)[-response_length:]
+
+                if teacher_log_prob.numel() != response_length or student_log_prob.numel() != response_length:
+                    raise ValueError(
+                        "Mismatched OPD logprob lengths at sample "
+                        f"{idx}: response_length={response_length}, "
+                        f"teacher={teacher_log_prob.numel()}, student={student_log_prob.numel()}"
+                    )
+
+                advantages.append((teacher_log_prob - student_log_prob).detach())
+
+            rollout_data["advantages"] = rollout_data["returns"] = advantages
         else:
             raise NotImplementedError(f"Unsupported advantage_estimator {self.args.advantage_estimator}")
 
