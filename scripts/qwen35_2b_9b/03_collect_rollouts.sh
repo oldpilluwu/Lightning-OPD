@@ -9,6 +9,8 @@ RAW_DIR="${EXP_DIR}/rollouts/raw"
 rm -rf "${RAW_DIR}"
 mkdir -p "${RAW_DIR}" "$(dirname "${ROLLOUT_DATA}")"
 
+python scripts/qwen35_2b_9b/patch_vllm_ignore_visual.py
+
 python scripts/qwen35_2b_9b/prepare_vllm_checkpoint.py \
     --sft-checkpoint "${SFT_CHECKPOINT}" \
     --base-model "${STUDENT_BASE}" \
