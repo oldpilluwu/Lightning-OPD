@@ -36,6 +36,10 @@ def _get_int_env(name: str, default: int) -> int:
     return int(os.environ.get(name, str(default)))
 
 
+def _get_str_env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
 def execute(rerun=True):
     save_dir = os.environ.get("SAVE_DIR", "checkpoints/qwen35_2b_9b/lightning_opd_fsdp")
     Path(save_dir).mkdir(parents=True, exist_ok=True)
@@ -70,7 +74,7 @@ def execute(rerun=True):
     fsdp_args = (
         "--train-backend fsdp "
         "--gradient-checkpointing "
-        "--attn-implementation flash_attention_2 "
+        f"--attn-implementation {_get_str_env('FSDP_ATTN_IMPLEMENTATION', 'sdpa')} "
         "--optimizer adam "
         "--lr 2e-6 "
         "--lr-decay-style constant "

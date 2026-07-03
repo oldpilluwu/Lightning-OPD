@@ -11,7 +11,6 @@ import ray
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from ring_flash_attn import substitute_hf_flash_attn, update_ring_flash_attn_params
 from tqdm import tqdm
 from transformers import AutoConfig
 
@@ -43,6 +42,12 @@ from .lr_scheduler import get_lr_scheduler
 from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTensor
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ring_flash_attn import substitute_hf_flash_attn, update_ring_flash_attn_params
+except (ImportError, ModuleNotFoundError):
+    substitute_hf_flash_attn = None
+    update_ring_flash_attn_params = None
 
 
 class FSDPTrainRayActor(TrainRayActor):
@@ -234,6 +239,11 @@ class FSDPTrainRayActor(TrainRayActor):
 
         # Setup Ring Flash Attention with CP group from mesh (only when cp_size > 1)
         if self.cp_size > 1:
+            if substitute_hf_flash_attn is None:
+                raise ImportError(
+                    "ring_flash_attn with flash-attn is required when context_parallel_size > 1. "
+                    "Install a compatible flash-attn package or set --context-parallel-size 1."
+                )
             substitute_hf_flash_attn(self.cp_group, heads_k_stride=1)
             logger.info(f"[Rank {rank}] CP initialized via device mesh")
         else:
@@ -885,6 +895,11 @@ class FSDPTrainRayActor(TrainRayActor):
             if not packed_sequence["cu_seqlens"].is_cuda:
                 packed_sequence["cu_seqlens"] = packed_sequence["cu_seqlens"].cuda()
             cu_seqlens = packed_sequence["cu_seqlens"]
+            if update_ring_flash_attn_params is None:
+                raise ImportError(
+                    "ring_flash_attn with flash-attn is required when context_parallel_size > 1. "
+                    "Install a compatible flash-attn package or set --context-parallel-size 1."
+                )
             update_ring_flash_attn_params(cu_seqlens, self.cp_group)
 
             input_ids = torch.chunk(packed_sequence["tokens"].unsqueeze(0), self.cp_size, dim=1)[self.cp_rank]
