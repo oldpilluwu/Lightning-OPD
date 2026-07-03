@@ -476,6 +476,9 @@ class FSDPTrainRayActor(TrainRayActor):
                     rollout_log_probs=(
                         rollout_data["rollout_log_probs"][start:end] if "rollout_log_probs" in rollout_data else None
                     ),
+                    teacher_log_probs=(
+                        rollout_data["teacher_log_probs"][start:end] if "teacher_log_probs" in rollout_data else None
+                    ),
                     multimodal_train_inputs=(
                         rollout_data["multimodal_train_inputs"][start:end]
                         if "multimodal_train_inputs" in rollout_data
@@ -553,6 +556,7 @@ class FSDPTrainRayActor(TrainRayActor):
             )
 
     def _train_core(self, rollout_id: int, rollout_data) -> None:
+        compute_opd_advantages_from_actor = False
         if self.args.advantage_estimator in ["grpo", "gspo"]:
             rollout_data["advantages"] = rollout_data["returns"] = [
                 torch.tensor([rollout_data["rewards"][i]] * rollout_data["response_lengths"][i])
@@ -566,32 +570,36 @@ class FSDPTrainRayActor(TrainRayActor):
             student_log_probs_key = "rollout_log_probs" if "rollout_log_probs" in rollout_data else "log_probs"
             student_log_probs = rollout_data.get(student_log_probs_key)
             if student_log_probs is None:
-                raise ValueError("rollout_log_probs or log_probs is required for on_policy_distillation")
-
-            if len(teacher_log_probs) != len(student_log_probs):
-                raise ValueError(
-                    "Mismatched OPD batch sizes: "
-                    f"teacher={len(teacher_log_probs)}, student={len(student_log_probs)}"
-                )
-
-            advantages = []
-            response_lengths = rollout_data["response_lengths"]
-            for idx, (teacher_log_prob, student_log_prob, response_length) in enumerate(
-                zip(teacher_log_probs, student_log_probs, response_lengths, strict=False)
-            ):
-                teacher_log_prob = torch.as_tensor(teacher_log_prob, dtype=torch.float32)[-response_length:]
-                student_log_prob = torch.as_tensor(student_log_prob, dtype=torch.float32)[-response_length:]
-
-                if teacher_log_prob.numel() != response_length or student_log_prob.numel() != response_length:
+                compute_opd_advantages_from_actor = True
+                rollout_data["advantages"] = rollout_data["returns"] = [
+                    torch.zeros(response_length, dtype=torch.float32)
+                    for response_length in rollout_data["response_lengths"]
+                ]
+            else:
+                if len(teacher_log_probs) != len(student_log_probs):
                     raise ValueError(
-                        "Mismatched OPD logprob lengths at sample "
-                        f"{idx}: response_length={response_length}, "
-                        f"teacher={teacher_log_prob.numel()}, student={student_log_prob.numel()}"
+                        "Mismatched OPD batch sizes: "
+                        f"teacher={len(teacher_log_probs)}, student={len(student_log_probs)}"
                     )
 
-                advantages.append((teacher_log_prob - student_log_prob).detach())
+                advantages = []
+                response_lengths = rollout_data["response_lengths"]
+                for idx, (teacher_log_prob, student_log_prob, response_length) in enumerate(
+                    zip(teacher_log_probs, student_log_probs, response_lengths, strict=False)
+                ):
+                    teacher_log_prob = torch.as_tensor(teacher_log_prob, dtype=torch.float32)[-response_length:]
+                    student_log_prob = torch.as_tensor(student_log_prob, dtype=torch.float32)[-response_length:]
 
-            rollout_data["advantages"] = rollout_data["returns"] = advantages
+                    if teacher_log_prob.numel() != response_length or student_log_prob.numel() != response_length:
+                        raise ValueError(
+                            "Mismatched OPD logprob lengths at sample "
+                            f"{idx}: response_length={response_length}, "
+                            f"teacher={teacher_log_prob.numel()}, student={student_log_prob.numel()}"
+                        )
+
+                    advantages.append((teacher_log_prob - student_log_prob).detach())
+
+                rollout_data["advantages"] = rollout_data["returns"] = advantages
         else:
             raise NotImplementedError(f"Unsupported advantage_estimator {self.args.advantage_estimator}")
 
@@ -605,6 +613,30 @@ class FSDPTrainRayActor(TrainRayActor):
             self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
 
         self._compute_log_prob("actor", packed_batches)
+        if compute_opd_advantages_from_actor:
+            for packed_batch in packed_batches:
+                teacher_log_probs = packed_batch.get("teacher_log_probs")
+                student_log_probs = packed_batch["log_probs"]
+                if teacher_log_probs is None:
+                    raise ValueError("teacher_log_probs is required in packed batches for on_policy_distillation")
+
+                teacher_log_probs = teacher_log_probs.to(device=student_log_probs.device, dtype=torch.float32)
+                student_log_probs = student_log_probs.to(dtype=torch.float32)
+                if teacher_log_probs.numel() != student_log_probs.numel():
+                    raise ValueError(
+                        "Mismatched packed OPD logprob lengths: "
+                        f"teacher={teacher_log_probs.numel()}, student={student_log_probs.numel()}"
+                    )
+
+                advantages = (teacher_log_probs - student_log_probs).detach()
+                packed_batch["advantages"] = advantages
+                packed_batch["returns"] = advantages
+                rollout_log_probs = packed_batch.get("rollout_log_probs")
+                if (
+                    self.args.use_rollout_logprobs
+                    and (not isinstance(rollout_log_probs, torch.Tensor) or rollout_log_probs.numel() == 0)
+                ):
+                    packed_batch["rollout_log_probs"] = student_log_probs.detach()
         self._log_rollout_data(rollout_id, rollout_data, packed_batches)
 
         with timer("actor_train"):
