@@ -4,6 +4,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 SFT_CHECKPOINT="$(find_latest_sft_checkpoint)"
 VLLM_CHECKPOINT="${SFT_VLLM_CHECKPOINT:-${SFT_VLLM_DIR}/$(basename "${SFT_CHECKPOINT}")}"
+VLLM_USE_V1="${VLLM_USE_V1:-0}"
 RAW_DIR="${EXP_DIR}/rollouts/raw"
 rm -rf "${RAW_DIR}"
 mkdir -p "${RAW_DIR}" "$(dirname "${ROLLOUT_DATA}")"
@@ -14,6 +15,7 @@ python scripts/qwen35_2b_9b/prepare_vllm_checkpoint.py \
     --output-dir "${VLLM_CHECKPOINT}" \
     --force
 
+VLLM_USE_V1="${VLLM_USE_V1}" \
 SFT_CHECKPOINT="${VLLM_CHECKPOINT}" \
 OPD_PROMPTS="${OPD_PROMPTS}" \
 OUTPUT_DIR="${RAW_DIR}" \
