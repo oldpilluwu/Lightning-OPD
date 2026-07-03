@@ -133,7 +133,12 @@ CONDA_CHANNEL="${CONDA_CHANNEL:-conda-forge}"
 # error out instead. CONDA_INSTALL_DIR is where a fresh install lands.
 AUTO_INSTALL_CONDA="${AUTO_INSTALL_CONDA:-1}"
 CONDA_INSTALL_DIR="${CONDA_INSTALL_DIR:-${HOME}/miniconda3}"
-CURATION_PACKAGES=(vllm transformers pyarrow pandas tqdm datasets pyyaml "huggingface_hub[cli]")
+# Pin vLLM: the latest builds use a v1 UVA mapped-pinned-host-memory buffer
+# (UvaBuffer/get_cuda_view_from_cpu_tensor) that fails on many virtualized
+# cloud A100 VMs with "cudaHostGetDevicePointer failed: invalid argument".
+# 0.9.2 predates that path and supports Qwen3. Override via VLLM_SPEC.
+VLLM_SPEC="${VLLM_SPEC:-vllm==0.9.2}"
+CURATION_PACKAGES=("${VLLM_SPEC}" transformers pyarrow pandas tqdm datasets pyyaml "huggingface_hub[cli]")
 SFT_PACKAGES=(llamafactory torch transformers datasets pandas pyyaml liger-kernel)
 
 SFT_PROMPTS="${RUN_DIR}/data/prompts/openthoughts3_${SFT_SAMPLES}.jsonl"
