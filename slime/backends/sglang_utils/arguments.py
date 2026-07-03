@@ -122,12 +122,12 @@ def validate_args(args):
         args.sglang_expert_parallel_size = args.rollout_num_gpus_per_engine
 
     args.sglang_tp_size = args.rollout_num_gpus_per_engine
-    args.sglang_dp_size = args.sglang_data_parallel_size
-    args.sglang_pp_size = args.sglang_pipeline_parallel_size
-    args.sglang_ep_size = args.sglang_expert_parallel_size
+    args.sglang_dp_size = getattr(args, "sglang_data_parallel_size", 1)
+    args.sglang_pp_size = getattr(args, "sglang_pipeline_parallel_size", 1)
+    args.sglang_ep_size = getattr(args, "sglang_expert_parallel_size", 1)
 
     if args.sglang_dp_size > 1:
-        assert args.sglang_enable_dp_attention
+        assert getattr(args, "sglang_enable_dp_attention", False)
 
     if getattr(args, "sglang_router_ip", None):
         args.sglang_router_ip = _wrap_ipv6(args.sglang_router_ip)
