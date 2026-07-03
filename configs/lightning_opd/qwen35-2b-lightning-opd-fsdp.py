@@ -87,6 +87,7 @@ def execute(rerun=True):
 
     grpo_args = (
         "--advantage-estimator on_policy_distillation "
+        "--use-rollout-logprobs "
         "--use-kl-loss "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
