@@ -116,6 +116,7 @@ if missing:
     print(" ".join(missing))
     sys.exit(1)
 PY
+  then
     return 0
   fi
 
