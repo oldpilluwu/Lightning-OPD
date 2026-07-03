@@ -284,7 +284,7 @@ run_sft_with_metrics() {
       echo "[sft] training to step ${target} (resume: ${resume:-none})"
       torchrun --nnodes 1 --nproc_per_node 1 \
         --rdzv_id "${RANDOM}" --rdzv_backend c10d --rdzv_endpoint "127.0.0.1:${MASTER_PORT}" \
-        -m llamafactory.cli.train "${SFT_CONFIG}" \
+        -m llamafactory.launcher "${SFT_CONFIG}" \
         "dataset_dir=${SFT_CFG_DIR}" \
         "output_dir=${SFT_OUTPUT_DIR}" \
         "max_steps=${target}" \

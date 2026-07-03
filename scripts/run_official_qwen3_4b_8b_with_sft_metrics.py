@@ -243,7 +243,7 @@ def run_sft(args, config_path: Path) -> Path:
             "--rdzv_endpoint",
             f"{args.master_addr}:{args.master_port}",
             "-m",
-            "llamafactory.cli.train",
+            "llamafactory.launcher",
             str(config_path),
             f"dataset_dir={config_path.parent}",
             f"output_dir={out_dir}",
