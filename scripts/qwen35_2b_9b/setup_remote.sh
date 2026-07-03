@@ -90,7 +90,7 @@ create_env "${TRAIN_ENV}"
 echo "Installing curation env..."
 run_in_env "${CURATION_ENV}" "curation_00_pip" "python -m pip install --upgrade pip"
 pip_install "${CURATION_ENV}" "curation_01_core" \
-    "transformers>=4.57.0,<5.0.0" "pyarrow" "pandas" "tqdm" "datasets" "accelerate" "huggingface_hub[cli]"
+    "transformers>=4.57.0,<5.0.0" "pyarrow" "pandas" "tqdm" "datasets" "accelerate" "huggingface_hub[cli]" "safetensors"
 pip_install "${CURATION_ENV}" "curation_02_vllm" "vllm"
 
 echo "Installing SFT env..."

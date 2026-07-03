@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 
 WEIGHT_SUFFIXES = (
@@ -41,6 +43,11 @@ BASE_IGNORE_PATTERNS = [
     "*.msgpack",
 ]
 
+BASE_WEIGHT_ALLOW_PATTERNS = [
+    "*.safetensors",
+    "model.safetensors.index.json",
+]
+
 
 def copy_tree_files(src: Path, dst: Path, *, skip_weights: bool) -> None:
     for path in src.rglob("*"):
@@ -63,6 +70,40 @@ def copy_sft_weights(src: Path, dst: Path) -> int:
             shutil.copy2(path, dst / path.name)
             count += 1
     return count
+
+
+def add_base_visual_weights(base_model: str, output_dir: Path) -> int:
+    base_weights = Path(
+        snapshot_download(
+            repo_id=base_model,
+            allow_patterns=BASE_WEIGHT_ALLOW_PATTERNS,
+        )
+    )
+
+    visual_tensors = {}
+    for shard in sorted(base_weights.glob("*.safetensors")):
+        with safe_open(shard, framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                if key.startswith("visual."):
+                    visual_tensors[key] = handle.get_tensor(key)
+
+    if not visual_tensors:
+        return 0
+
+    visual_path = output_dir / "base_visual.safetensors"
+    save_file(visual_tensors, visual_path)
+
+    index_path = output_dir / "model.safetensors.index.json"
+    if index_path.exists():
+        index = read_config(index_path)
+        weight_map = index.setdefault("weight_map", {})
+        for key in visual_tensors:
+            weight_map[key] = visual_path.name
+        metadata = index.setdefault("metadata", {})
+        metadata["base_visual_tensors"] = len(visual_tensors)
+        index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n")
+
+    return len(visual_tensors)
 
 
 def read_config(path: Path) -> dict:
@@ -101,6 +142,8 @@ def main() -> None:
     if weights == 0:
         raise FileNotFoundError(f"No model weight files found in {sft_checkpoint}")
 
+    visual_weights = add_base_visual_weights(args.base_model, output_dir)
+
     # Keep the fine-tuned generation/tokenizer files if the native SFT run wrote
     # any, but intentionally keep base config.json. vLLM currently expects the
     # base Qwen3.5 config wrapper, not Transformers 5's Qwen3_5TextConfig save.
@@ -119,6 +162,7 @@ def main() -> None:
         "base_architectures": base_cfg.get("architectures"),
         "sft_model_type": sft_cfg.get("model_type"),
         "sft_architectures": sft_cfg.get("architectures"),
+        "base_visual_tensors_added": visual_weights,
         "weight_files": sorted(path.name for path in output_dir.iterdir() if path.suffix in WEIGHT_SUFFIXES),
     }
     (output_dir / "vllm_prepare_report.json").write_text(json.dumps(report, indent=2) + "\n")
