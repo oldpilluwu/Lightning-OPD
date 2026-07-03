@@ -14,30 +14,40 @@ def patch_file(path: Path) -> bool:
         print(f"already patched {path}")
         return True
 
-    old = """                if weights_not_loaded:
-                    raise ValueError("Following weights were not initialized from "
-                                     f"checkpoint: {weights_not_loaded}")
-"""
-    new = """                if weights_not_loaded:
-                    # qwen35_text_only_ignore_visual: vLLM currently instantiates
-                    # Qwen3.5 text-only checkpoints with a multimodal class. Text
-                    # rollouts do not use the visual encoder, so ignore missing
-                    # visual.* tensors while keeping strict checks for text weights.
-                    weights_not_loaded = {
-                        name for name in weights_not_loaded
-                        if not name.startswith("visual.")
-                    }
-                if weights_not_loaded:
-                    raise ValueError("Following weights were not initialized from "
-                                     f"checkpoint: {weights_not_loaded}")
-"""
+    needle = "weights_not_loaded = weights_to_load - loaded_weights"
+    lines = text.splitlines()
+    out = []
+    patched_count = 0
 
-    if old not in text:
-        raise SystemExit(f"Could not find strict weight check block in {path}")
+    for idx, line in enumerate(lines):
+        out.append(line)
+        if needle not in line:
+            continue
 
-    path.write_text(text.replace(old, new))
+        next_lines = "\n".join(lines[idx + 1 : idx + 8])
+        if marker in next_lines:
+            continue
+
+        indent = line[: len(line) - len(line.lstrip())]
+        out.extend(
+            [
+                f"{indent}# {marker}: vLLM currently instantiates Qwen3.5",
+                f"{indent}# text-only checkpoints with a multimodal class. Text",
+                f"{indent}# rollouts do not use visual encoder weights.",
+                f"{indent}weights_not_loaded = {{",
+                f"{indent}    name for name in weights_not_loaded",
+                f'{indent}    if not name.startswith("visual.")',
+                f"{indent}}}",
+            ]
+        )
+        patched_count += 1
+
+    if patched_count == 0:
+        raise SystemExit(f"Could not find weight tracking assignment in {path}")
+
+    path.write_text("\n".join(out) + "\n")
     compile(path.read_text(), str(path), "exec")
-    print(f"patched {path}")
+    print(f"patched {path} ({patched_count} insertion(s))")
     return True
 
 
