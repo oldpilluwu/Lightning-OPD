@@ -203,6 +203,9 @@ def make_runtime_sft_config(args, sft_parquet: Path) -> Path:
     with base_cfg_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    # The base YAML references a DeepSpeed config that only exists inside the
+    # LlamaFactory repo; it is not needed for single-node training here.
+    cfg.pop("deepspeed", None)
     cfg["model_name_or_path"] = args.student_model
     cfg["dataset"] = dataset_name
     cfg["max_steps"] = args.sft_max_steps
@@ -250,6 +253,19 @@ def run_sft(args, config_path: Path) -> Path:
     return out_dir
 
 
+def load_causal_lm(path, attn_implementation: str):
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    kwargs = dict(torch_dtype=torch.bfloat16, device_map={"": "cuda"}, trust_remote_code=True)
+    if attn_implementation and attn_implementation != "sdpa":
+        try:
+            return AutoModelForCausalLM.from_pretrained(path, attn_implementation=attn_implementation, **kwargs)
+        except (ImportError, ValueError) as exc:
+            print(f"[metrics] attn_implementation={attn_implementation} unavailable ({exc}); falling back to sdpa", flush=True)
+    return AutoModelForCausalLM.from_pretrained(path, attn_implementation="sdpa", **kwargs)
+
+
 def checkpoint_step(path: Path) -> int:
     match = re.search(r"checkpoint-(\d+)$", path.name)
     return int(match.group(1)) if match else 10**18
@@ -278,20 +294,13 @@ def build_or_load_probe(args, tokenizer) -> list[dict[str, Any]]:
         return read_jsonl(probe_path)
 
     import torch
-    from transformers import AutoModelForCausalLM
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     rows = read_jsonl(args.opd_prompts_sampled)[: args.probe_samples]
 
     print(f"[probe] Building fixed OPD probe with teacher {args.teacher_model}", flush=True)
-    teacher = AutoModelForCausalLM.from_pretrained(
-        args.teacher_model,
-        torch_dtype=torch.bfloat16,
-        device_map={"": "cuda"},
-        trust_remote_code=True,
-        attn_implementation=args.attn_implementation,
-    )
+    teacher = load_causal_lm(args.teacher_model, args.attn_implementation)
     teacher.eval()
 
     probe = []
@@ -337,7 +346,7 @@ def append_metric_row(jsonl_path: Path, csv_path: Path, row: dict[str, Any]) -> 
 
 def evaluate_sft_checkpoints(args, sft_output_dir: Path) -> None:
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     checkpoints = list_checkpoints(sft_output_dir)
     if not checkpoints:
@@ -363,13 +372,7 @@ def evaluate_sft_checkpoints(args, sft_output_dir: Path) -> None:
         should_write = step not in seen_steps
 
         print(f"[metrics] Scoring SFT checkpoint step={step}: {ckpt}", flush=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            ckpt,
-            torch_dtype=torch.bfloat16,
-            device_map={"": "cuda"},
-            trust_remote_code=True,
-            attn_implementation=args.attn_implementation,
-        )
+        model = load_causal_lm(ckpt, args.attn_implementation)
         model.eval()
 
         teacher_nll_sum = 0.0

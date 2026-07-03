@@ -3,11 +3,39 @@
 
 # Single-GPU Qwen3-4B student / Qwen3-8B teacher Lightning-OPD pipeline.
 #
+# Stages (all under RUN_DIR, each skipped once complete):
+#   1. sample 5k SFT prompts (OpenThoughts3) + 2k OPD prompts (DAPO-Math-17k)
+#   2. generate SFT data with the teacher (vLLM, batch-size 128)
+#   3. SFT in 5-step chunks; after each chunk a fixed teacher-generated OPD
+#      probe batch is scored against the checkpoint and logged to
+#      RUN_DIR/metrics/sft_checkpoint_opd_probe_metrics.{jsonl,csv}:
+#        probe/teacher_nll                     teacher NLL on the probe batch
+#        probe/student_nll                     student NLL on the same batch
+#        probe/kl_mc_teacher_to_student        MC estimate of KL(teacher||student)
+#        probe/policy_drift_prev_to_current_mc mean logprob shift vs prev ckpt
+#        probe/policy_drift_abs_logprob_delta  mean |logprob shift| vs prev ckpt
+#      The previous checkpoint is deleted after scoring; the latest one is
+#      kept because it is required to resume training.
+#   4. collect student rollouts on the OPD prompts
+#   5. precompute teacher logprobs (sglang server, started/stopped here)
+#   6. Lightning OPD training on 1 GPU
+#
 # Resumability:
-#   - Every stage writes under RUN_DIR and skips completed outputs.
-#   - SFT is run in 5-step chunks by default. After each checkpoint is saved,
-#     the checkpoint is scored, then the previous checkpoint is removed.
-#   - The latest checkpoint is retained because it is required for resume.
+#   - Stage completion markers live in RUN_DIR/.done.
+#   - SFT resumes from the newest retained checkpoint; per-step metrics that
+#     already exist are skipped.
+#   - vLLM curation stages checkpoint per batch and resume mid-dataset.
+#
+# Environments (README setup, managed automatically when USE_CONDA=1):
+#   - conda env "curation"     prompts + vLLM generation (stages 1, 2, 4)
+#   - conda env "llamafactory" SFT training + checkpoint metrics (stage 3)
+#   - OPD stages (5, 6) run in the CURRENT environment by default because
+#     they need sglang + Megatron, which the repo provides via its docker
+#     container (bash run_docker.sh). Set OPD_ENV to a conda env name if you
+#     have those dependencies in conda instead.
+#   Each env is created and populated once (marker-gated), activated before
+#   its stage and deactivated afterwards. Set USE_CONDA=0 to run everything
+#   in the current environment (e.g. inside a single mega-env or container).
 #
 # Example:
 #   bash scripts/run_single_gpu_qwen3_4b_8b_pipeline.sh
@@ -35,8 +63,8 @@ OPD_SAMPLES="${OPD_SAMPLES:-2000}"
 SEED="${SEED:-42}"
 
 # Larger curation batch size than the repo default (32). Reduce if vLLM OOMs.
-GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-64}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-64}"
+GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-128}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-128}"
 CURATION_NUM_GPUS="${CURATION_NUM_GPUS:-1}"
 TEACHER_TP="${TEACHER_TP:-1}"
 STUDENT_TP="${STUDENT_TP:-1}"
@@ -55,7 +83,14 @@ SFT_PER_DEVICE_TRAIN_BATCH_SIZE="${SFT_PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 SFT_GRADIENT_ACCUMULATION_STEPS="${SFT_GRADIENT_ACCUMULATION_STEPS:-8}"
 SFT_LR="${SFT_LR:-8e-5}"
 SFT_CUTOFF_LEN="${SFT_CUTOFF_LEN:-16384}"
-SFT_REPORT_TO="${SFT_REPORT_TO:-wandb}"
+# Chunked training relaunches the trainer with a new max_steps every
+# SFT_METRIC_INTERVAL steps. Schedules that depend on max_steps (cosine,
+# warmup_ratio) would be recomputed per chunk, so use a chunk-invariant
+# schedule: constant LR after a fixed number of warmup steps.
+SFT_LR_SCHEDULER="${SFT_LR_SCHEDULER:-constant_with_warmup}"
+SFT_WARMUP_STEPS="${SFT_WARMUP_STEPS:-10}"
+SFT_ENABLE_LIGER="${SFT_ENABLE_LIGER:-1}"
+SFT_REPORT_TO="${SFT_REPORT_TO:-none}"
 
 PROBE_SAMPLES="${PROBE_SAMPLES:-8}"
 PROBE_MAX_NEW_TOKENS="${PROBE_MAX_NEW_TOKENS:-512}"
@@ -79,6 +114,21 @@ FORCE="${FORCE:-0}"
 SKIP_OPD="${SKIP_OPD:-0}"
 AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-1}"
 
+# ── Environment management ──────────────────────────────────────────────────
+# USE_CONDA=1: create/activate the README's conda envs per stage.
+# USE_CONDA=0: run every stage in the current environment.
+USE_CONDA="${USE_CONDA:-1}"
+CURATION_ENV="${CURATION_ENV:-curation}"
+SFT_ENV="${SFT_ENV:-llamafactory}"
+# Empty means: run OPD stages in the current environment (the repo docker
+# container ships sglang/Megatron/torch). Set to a conda env name otherwise.
+OPD_ENV="${OPD_ENV:-}"
+ENV_PYTHON_VERSION="${ENV_PYTHON_VERSION:-3.10}"
+# conda-forge avoids the interactive Anaconda default-channel ToS prompt.
+CONDA_CHANNEL="${CONDA_CHANNEL:-conda-forge}"
+CURATION_PACKAGES=(vllm transformers pyarrow pandas tqdm datasets pyyaml "huggingface_hub[cli]")
+SFT_PACKAGES=(llamafactory torch transformers datasets pandas pyyaml liger-kernel)
+
 SFT_PROMPTS="${RUN_DIR}/data/prompts/openthoughts3_${SFT_SAMPLES}.jsonl"
 OPD_PROMPTS="${RUN_DIR}/data/prompts/opd_prompts_${OPD_SAMPLES}.jsonl"
 SFT_RAW_DIR="${RUN_DIR}/data/sft_data_raw"
@@ -86,6 +136,10 @@ SFT_PARQUET="${RUN_DIR}/data/sft_data/openthoughts3_${SFT_SAMPLES}_qwen3-8b.parq
 SFT_CFG_DIR="${RUN_DIR}/configs/sft"
 SFT_CONFIG="${SFT_CFG_DIR}/qwen3-4b-single-gpu-runtime.yaml"
 SFT_OUTPUT_DIR="${RUN_DIR}/checkpoints/qwen3-4b-base-sft-qwen3-8b"
+# Tokenized dataset cache so the 600 chunked trainer relaunches do not
+# re-tokenize the SFT data every time. Delete this dir if it gets corrupted
+# by a crash mid-tokenization.
+SFT_TOKENIZED_DIR="${RUN_DIR}/data/sft_tokenized"
 ROLLOUT_RAW_DIR="${RUN_DIR}/data/rollouts_raw"
 ROLLOUT_PARQUET="${RUN_DIR}/data/rollouts/dapo_${OPD_SAMPLES}_qwen3-4b-sft-rollouts.parquet"
 LIGHTNING_OPD_DIR="${RUN_DIR}/data/lightning_opd"
@@ -101,6 +155,110 @@ run_stage() {
   echo "[stage] ${marker}"
   "$@"
   date -Is > "${DONE_DIR}/${marker}"
+}
+
+# ── Environment helpers ─────────────────────────────────────────────────────
+
+CONDA_HOOKED=0
+
+ensure_conda() {
+  if (( CONDA_HOOKED )); then
+    return 0
+  fi
+  if ! command -v conda >/dev/null 2>&1; then
+    echo "conda not found. Install Miniconda/Anaconda, or set USE_CONDA=0 to" >&2
+    echo "run every stage in the current environment." >&2
+    exit 1
+  fi
+  # conda's shell hooks reference unset variables; relax nounset around them.
+  set +u
+  # shellcheck disable=SC1091
+  source "$(conda info --base)/etc/profile.d/conda.sh"
+  set -u
+  CONDA_HOOKED=1
+}
+
+conda_env_exists() {
+  conda env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -qx "$1"
+}
+
+activate_env() {
+  local env_name="$1"
+  if [[ "${USE_CONDA}" != "1" || -z "${env_name}" ]]; then
+    return 0
+  fi
+  ensure_conda
+  echo "[env] Activating conda env: ${env_name}"
+  set +u
+  conda activate "${env_name}"
+  set -u
+}
+
+deactivate_env() {
+  local env_name="$1"
+  if [[ "${USE_CONDA}" != "1" || -z "${env_name}" ]]; then
+    return 0
+  fi
+  echo "[env] Deactivating conda env: ${env_name}"
+  set +u
+  conda deactivate
+  set -u
+}
+
+# Run a command (or shell function) with the given env loaded, then unload it.
+# On failure, set -e terminates the script, which drops the activation with it.
+# Do not wrap "$@" in a status check here: testing its exit code would disable
+# errexit inside the stage function and let partial failures continue.
+run_in_env() {
+  local env_name="$1"
+  shift
+  activate_env "${env_name}"
+  "$@"
+  deactivate_env "${env_name}"
+}
+
+setup_conda_env() {
+  local env_name="$1"
+  shift
+  if [[ "${USE_CONDA}" != "1" ]]; then
+    echo "[env] USE_CONDA=0, skipping setup of ${env_name}"
+    return 0
+  fi
+  ensure_conda
+  if ! conda_env_exists "${env_name}"; then
+    echo "[env] Creating conda env ${env_name} (python=${ENV_PYTHON_VERSION})"
+    conda create -y -n "${env_name}" "python=${ENV_PYTHON_VERSION}" \
+      --override-channels -c "${CONDA_CHANNEL}"
+  fi
+  activate_env "${env_name}"
+  echo "[env] Installing into ${env_name}: $*"
+  python -m pip install "$@"
+  deactivate_env "${env_name}"
+}
+
+setup_curation_env() {
+  setup_conda_env "${CURATION_ENV}" "${CURATION_PACKAGES[@]}"
+}
+
+setup_sft_env() {
+  setup_conda_env "${SFT_ENV}" "${SFT_PACKAGES[@]}"
+}
+
+setup_opd_env() {
+  if [[ "${USE_CONDA}" == "1" && -n "${OPD_ENV}" ]]; then
+    ensure_conda
+    if ! conda_env_exists "${OPD_ENV}"; then
+      echo "[env] Creating conda env ${OPD_ENV} (python=${ENV_PYTHON_VERSION})"
+      conda create -y -n "${OPD_ENV}" "python=${ENV_PYTHON_VERSION}" \
+        --override-channels -c "${CONDA_CHANNEL}"
+    fi
+    run_in_env "${OPD_ENV}" python -m pip install -e .
+  else
+    # Official route: the repo docker container (sglang/Megatron preinstalled);
+    # only the repo itself needs installing.
+    echo "[env] Installing repo into current environment (pip install -e .)"
+    python -m pip install -e .
+  fi
 }
 
 ensure_prompt_prep_deps() {
@@ -236,7 +394,8 @@ generate_sft_data() {
     bash scripts/generate_sft_data.sh \
       --num-samples "${SFT_SAMPLES}" \
       --max-tokens "${SFT_GEN_MAX_TOKENS}" \
-      --batch-size "${GEN_BATCH_SIZE}"
+      --batch-size "${GEN_BATCH_SIZE}" \
+      --checkpoint-dir "${RUN_DIR}/data/.curation_ckpt_sft"
 
   python data_curation/merge.py --input-dir "${SFT_RAW_DIR}" --output "${SFT_PARQUET}"
 }
@@ -261,6 +420,12 @@ dataset_name = "openthoughts3_${SFT_SAMPLES}_qwen3_8b_runtime"
 with open("configs/sft/qwen3-4b-base-open-thoughts3-qwen3-8b.yaml", "r", encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 
+# The base YAML references a DeepSpeed config that only exists inside the
+# LlamaFactory repo; single-GPU training does not need DeepSpeed at all.
+cfg.pop("deepspeed", None)
+# warmup_ratio depends on max_steps, which changes per chunk relaunch.
+cfg.pop("warmup_ratio", None)
+
 cfg.update({
     "model_name_or_path": "${STUDENT_MODEL}",
     "dataset": dataset_name,
@@ -270,8 +435,13 @@ cfg.update({
     "per_device_train_batch_size": int("${SFT_PER_DEVICE_TRAIN_BATCH_SIZE}"),
     "gradient_accumulation_steps": int("${SFT_GRADIENT_ACCUMULATION_STEPS}"),
     "learning_rate": float("${SFT_LR}"),
+    "lr_scheduler_type": "${SFT_LR_SCHEDULER}",
+    "warmup_steps": int("${SFT_WARMUP_STEPS}"),
     "cutoff_len": int("${SFT_CUTOFF_LEN}"),
     "gradient_checkpointing": True,
+    "enable_liger_kernel": "${SFT_ENABLE_LIGER}" == "1",
+    "overwrite_cache": False,
+    "tokenized_path": "${SFT_TOKENIZED_DIR}",
     "run_name": "${RUN_NAME}-sft",
     "report_to": "${SFT_REPORT_TO}",
 })
@@ -386,7 +556,8 @@ collect_rollouts() {
     bash scripts/collect_rollouts.sh \
       --num-samples "${OPD_SAMPLES}" \
       --max-tokens "${OPD_ROLLOUT_MAX_TOKENS}" \
-      --batch-size "${ROLLOUT_BATCH_SIZE}"
+      --batch-size "${ROLLOUT_BATCH_SIZE}" \
+      --checkpoint-dir "${RUN_DIR}/data/.curation_ckpt_rollout"
 
   python data_curation/merge.py --input-dir "${ROLLOUT_RAW_DIR}" --output "${ROLLOUT_PARQUET}"
 }
@@ -464,10 +635,13 @@ run_lightning_opd_single_gpu() {
     python configs/lightning_opd/qwen3-4b-lightning-opd-single-gpu.py
 }
 
-run_stage "prepare_sft_prompts" prepare_sft_prompts
-run_stage "prepare_opd_prompts" prepare_opd_prompts
-run_stage "generate_sft_data" generate_sft_data
-run_stage "sft_chunks_and_metrics" run_sft_chunks_with_metrics
+run_stage "setup_env_curation" setup_curation_env
+run_stage "setup_env_sft" setup_sft_env
+
+run_stage "prepare_sft_prompts" run_in_env "${CURATION_ENV}" prepare_sft_prompts
+run_stage "prepare_opd_prompts" run_in_env "${CURATION_ENV}" prepare_opd_prompts
+run_stage "generate_sft_data" run_in_env "${CURATION_ENV}" generate_sft_data
+run_stage "sft_chunks_and_metrics" run_in_env "${SFT_ENV}" run_sft_chunks_with_metrics
 
 if [[ "${SKIP_OPD}" == "1" ]]; then
   echo "[done] SFT checkpoint: $(cat "${RUN_DIR}/SFT_CHECKPOINT.txt")"
@@ -475,9 +649,10 @@ if [[ "${SKIP_OPD}" == "1" ]]; then
   exit 0
 fi
 
-run_stage "collect_rollouts" collect_rollouts
-run_stage "precompute_lightning_opd" precompute_lightning_opd
-run_stage "lightning_opd_train_single_gpu" run_lightning_opd_single_gpu
+run_stage "collect_rollouts" run_in_env "${CURATION_ENV}" collect_rollouts
+run_stage "setup_env_opd" setup_opd_env
+run_stage "precompute_lightning_opd" run_in_env "${OPD_ENV}" precompute_lightning_opd
+run_stage "lightning_opd_train_single_gpu" run_in_env "${OPD_ENV}" run_lightning_opd_single_gpu
 
 echo "[done] SFT checkpoint: $(cat "${RUN_DIR}/SFT_CHECKPOINT.txt")"
 echo "[done] SFT metrics: ${RUN_DIR}/metrics/sft_checkpoint_opd_probe_metrics.csv"
