@@ -825,6 +825,10 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
+        if self.args.rollout_num_gpus == 0:
+            logger.info("Skipping rollout weight update because rollout_num_gpus=0.")
+            return
+
         rollout_engines, rollout_engine_lock, num_new_engines = ray.get(
             self.rollout_manager.get_rollout_engines_and_lock.remote()
         )
