@@ -615,19 +615,27 @@ class FSDPTrainRayActor(TrainRayActor):
         self._compute_log_prob("actor", packed_batches)
         if compute_opd_advantages_from_actor:
             for packed_batch in packed_batches:
-                teacher_log_probs = packed_batch.get("teacher_log_probs")
-                student_log_probs = packed_batch["log_probs"]
-                if teacher_log_probs is None:
-                    raise ValueError("teacher_log_probs is required in packed batches for on_policy_distillation")
+                teacher_parts = []
+                student_parts = []
+                for idx, unpacked_batch in enumerate(unpack_sequences(packed_batch)):
+                    teacher_log_probs = unpacked_batch.get("teacher_log_probs")
+                    student_log_probs = unpacked_batch["log_probs"]
+                    if teacher_log_probs is None:
+                        raise ValueError("teacher_log_probs is required in packed batches for on_policy_distillation")
 
-                teacher_log_probs = teacher_log_probs.to(device=student_log_probs.device, dtype=torch.float32)
-                student_log_probs = student_log_probs.to(dtype=torch.float32)
-                if teacher_log_probs.numel() != student_log_probs.numel():
-                    raise ValueError(
-                        "Mismatched packed OPD logprob lengths: "
-                        f"teacher={teacher_log_probs.numel()}, student={student_log_probs.numel()}"
-                    )
+                    teacher_log_probs = teacher_log_probs.to(device=student_log_probs.device, dtype=torch.float32)
+                    student_log_probs = student_log_probs.to(dtype=torch.float32)
+                    if teacher_log_probs.numel() != student_log_probs.numel():
+                        raise ValueError(
+                            "Mismatched OPD logprob lengths in packed sample "
+                            f"{idx}: teacher={teacher_log_probs.numel()}, student={student_log_probs.numel()}"
+                        )
 
+                    teacher_parts.append(teacher_log_probs)
+                    student_parts.append(student_log_probs)
+
+                teacher_log_probs = torch.cat(teacher_parts, dim=0)
+                student_log_probs = torch.cat(student_parts, dim=0)
                 advantages = (teacher_log_probs - student_log_probs).detach()
                 packed_batch["advantages"] = advantages
                 packed_batch["returns"] = advantages
