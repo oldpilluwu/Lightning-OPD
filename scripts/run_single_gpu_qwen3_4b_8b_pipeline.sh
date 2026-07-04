@@ -225,6 +225,9 @@ dataset_name = f"sft_{samples}_qwen3_8b"
 
 with open("configs/sft/qwen3-4b-base-open-thoughts3-qwen3-8b.yaml", encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
+# YAML 1.1 parses bare scientific notation like 8e-5 as a string; fix numerics.
+if isinstance(cfg.get("learning_rate"), str):
+    cfg["learning_rate"] = float(cfg["learning_rate"])
 # deepspeed config path only exists inside the LlamaFactory repo; not needed on 1 GPU.
 cfg.pop("deepspeed", None)
 # warmup_ratio/cosine depend on max_steps, which changes every chunk; use a
