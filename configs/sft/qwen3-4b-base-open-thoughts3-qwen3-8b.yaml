@@ -33,7 +33,7 @@ run_name: qwen3-4b-base-open-thoughts3-qwen3-8b
 ### train
 per_device_train_batch_size: 4
 gradient_accumulation_steps: 2
-learning_rate: 8e-5
+learning_rate: 8.0e-5
 max_steps: 3000
 lr_scheduler_type: cosine
 warmup_ratio: 0.1
