@@ -74,7 +74,7 @@ The pipeline uses three separate environments to avoid dependency conflicts:
 ```bash
 conda create -n curation python=3.10 -y
 conda activate curation
-pip install vllm transformers pyarrow pandas tqdm datasets
+pip install vllm "transformers<4.54" pyarrow pandas tqdm datasets
 ```
 
 ### Environment 2: `llamafactory` (Step 2 — SFT training)

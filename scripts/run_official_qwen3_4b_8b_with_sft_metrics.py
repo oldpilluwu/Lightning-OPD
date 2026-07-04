@@ -195,6 +195,14 @@ def make_runtime_sft_config(args, sft_parquet: Path) -> Path:
             "file_name": str(sft_parquet.resolve()),
             "formatting": "sharegpt",
             "columns": {"messages": "messages"},
+            # our messages use role/content keys, not sharegpt's from/value
+            "tags": {
+                "role_tag": "role",
+                "content_tag": "content",
+                "user_tag": "user",
+                "assistant_tag": "assistant",
+                "system_tag": "system",
+            },
         }
     }
     (cfg_dir / "dataset_info.json").write_text(json.dumps(dataset_info, indent=2), encoding="utf-8")

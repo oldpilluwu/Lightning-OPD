@@ -214,7 +214,13 @@ dataset_name = f"sft_{samples}_qwen3_8b"
 (cfg_dir / "dataset_info.json").write_text(json.dumps({
     dataset_name: {"file_name": str(Path(parquet).resolve()),
                    "formatting": "sharegpt",
-                   "columns": {"messages": "messages"}}
+                   "columns": {"messages": "messages"},
+                   # our messages use role/content keys, not sharegpt's from/value
+                   "tags": {"role_tag": "role",
+                            "content_tag": "content",
+                            "user_tag": "user",
+                            "assistant_tag": "assistant",
+                            "system_tag": "system"}}
 }, indent=2), encoding="utf-8")
 
 with open("configs/sft/qwen3-4b-base-open-thoughts3-qwen3-8b.yaml", encoding="utf-8") as f:
