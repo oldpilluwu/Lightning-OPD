@@ -242,6 +242,9 @@ cfg.update({
     "gradient_accumulation_steps": 8,
     "lr_scheduler_type": "constant_with_warmup",
     "warmup_steps": 10,
+    # foreach AdamW allocates ~16GB of temporaries at step time; fused updates
+    # in place, which is the difference between fitting in 80GB and OOM here.
+    "optim": "adamw_torch_fused",
     "gradient_checkpointing": True,
     "overwrite_cache": False,
     "tokenized_path": tok_dir,
@@ -291,6 +294,7 @@ run_sft_with_metrics() {
         resume_arg="overwrite_output_dir=true"
       fi
       echo "[sft] training to step ${target} (resume: ${resume:-none})"
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
       torchrun --nnodes 1 --nproc_per_node 1 \
         --rdzv_id "${RANDOM}" --rdzv_backend c10d --rdzv_endpoint "127.0.0.1:${MASTER_PORT}" \
         -m llamafactory.launcher "${SFT_CONFIG}" \
