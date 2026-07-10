@@ -32,6 +32,7 @@ logprobs are then computed with a distributed logsumexp over the TP group
 """
 
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 
@@ -292,7 +293,9 @@ def main():
         zero_1=True,
         dataloader_drop_last=True,
         seed=args.seed,
-        report_to=["wandb"] if os.environ.get("WANDB_API_KEY") else [],
+        report_to=["wandb"]
+        if os.environ.get("WANDB_API_KEY") and importlib.util.find_spec("wandb")
+        else [],
         run_name=Path(args.output_dir).name,
     )
 

@@ -20,6 +20,7 @@ https://huggingface.co/docs/optimum-neuron for the current training API.
 """
 
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 
@@ -242,7 +243,9 @@ def main():
         tensor_parallel_size=args.tensor_parallel_size,
         zero_1=True,
         dataloader_drop_last=True,
-        report_to=["wandb"] if os.environ.get("WANDB_API_KEY") else [],
+        report_to=["wandb"]
+        if os.environ.get("WANDB_API_KEY") and importlib.util.find_spec("wandb")
+        else [],
         run_name=Path(args.output_dir).name,
     )
 
