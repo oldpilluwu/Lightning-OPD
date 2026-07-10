@@ -43,6 +43,7 @@ from pathlib import Path
 
 import pandas as pd
 import torch
+import torch_xla.core.xla_model as xm
 from transformers import AutoTokenizer
 
 from optimum.neuron import NeuronTrainingArguments
@@ -91,7 +92,7 @@ def build_full_ids(row, tokenizer):
     return prompt_ids + response_ids, len(response_ids)
 
 
-def score_microbatch(model, seqs, pad_id, max_seq_len, vocab_size):
+def score_microbatch(model, seqs, pad_id, max_seq_len, vocab_size, device):
     """Score a list of (full_ids, rlen) → list of per-response-token logprobs.
 
     Pads to a fixed (batch_size, max_seq_len) so Neuron compiles one shape. The
@@ -107,6 +108,11 @@ def score_microbatch(model, seqs, pad_id, max_seq_len, vocab_size):
         input_ids[b, :n] = torch.tensor(full_ids, dtype=torch.long)
         attention_mask[b, :n] = 1
         lengths.append(n)
+
+    # The model lives on the Neuron (XLA) device; inputs must too, or the
+    # tensor-parallel collectives raise "Expected XLA tensor. Got: CPU...".
+    input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
 
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -182,6 +188,7 @@ def main():
         )
         model.eval()
         vocab_size = model.config.vocab_size
+        device = xm.xla_device()
 
         for c in pending:
             lo, hi = c * args.chunk_size, min((c + 1) * args.chunk_size, len(rows))
@@ -195,7 +202,8 @@ def main():
                 # the padding rows afterwards.
                 pad_n = args.batch_size - len(mb)
                 mb_padded = mb + [mb[-1]] * pad_n if pad_n else mb
-                lps = score_microbatch(model, mb_padded, pad_id, args.max_seq_len, vocab_size)
+                lps = score_microbatch(model, mb_padded, pad_id, args.max_seq_len,
+                                       vocab_size, device)
                 chunk_lps.extend(lps[: len(mb)])
 
             if DEBUG and IS_MAIN and c == pending[0]:
