@@ -1,67 +1,63 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Build a disposable DSpark compatibility experiment on a Neuron DLAMI.
-# Nothing is installed into the AWS-managed /opt environment.
+# Validate the already-installed vLLM-Neuron environment for the DSpark probe.
+# This script intentionally does not clone or install vLLM.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFER_VENV="${INFER_VENV:-/opt/aws_neuronx_venv_pytorch_2_9_nxd_inference}"
-EXPERIMENT_VENV="${EXPERIMENT_VENV:-${SCRIPT_DIR}/.venv}"
-VLLM_SRC="${VLLM_SRC:-${SCRIPT_DIR}/vendor/vllm}"
-VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
-VLLM_REF="${VLLM_REF:-main}"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-    echo "ERROR: this experiment must be built on the AWS Neuron Linux instance." >&2
+    echo "ERROR: run this experiment on the AWS Neuron Linux instance." >&2
     exit 1
 fi
 
-for command_name in git neuron-ls; do
-    if ! command -v "${command_name}" >/dev/null 2>&1; then
-        echo "ERROR: required command not found: ${command_name}" >&2
-        exit 1
-    fi
-done
-
-if [[ ! -x "${INFER_VENV}/bin/python" ]]; then
-    echo "ERROR: NxD-Inference Python not found: ${INFER_VENV}/bin/python" >&2
+if ! command -v neuron-ls >/dev/null 2>&1; then
+    echo "ERROR: neuron-ls is unavailable; use a Neuron DLAMI/instance." >&2
     exit 1
 fi
 
-echo "=== DSpark / Trainium isolated experiment ==="
-echo "Base Neuron env: ${INFER_VENV}"
-echo "Experiment env:  ${EXPERIMENT_VENV}"
-echo "Upstream vLLM:   ${VLLM_REPO} @ ${VLLM_REF}"
+PYTHON="${INFER_VENV}/bin/python"
+if [[ ! -x "${PYTHON}" ]]; then
+    echo "ERROR: Neuron inference Python not found: ${PYTHON}" >&2
+    exit 1
+fi
+
+echo "=== Installed vLLM-Neuron DSpark experiment ==="
+echo "Neuron env: ${INFER_VENV}"
 neuron-ls
 
-# The overlay inherits the tested Neuron torch/NxDI/vllm-neuron packages. We do
-# not pip-install upstream vLLM because its normal wheel/build path targets CUDA.
-if [[ ! -x "${EXPERIMENT_VENV}/bin/python" ]]; then
-    "${INFER_VENV}/bin/python" -m venv --system-site-packages "${EXPERIMENT_VENV}"
-fi
+"${PYTHON}" - <<'PY'
+from importlib import metadata
 
-mkdir -p "$(dirname "${VLLM_SRC}")"
-if [[ ! -d "${VLLM_SRC}/.git" ]]; then
-    git clone --filter=blob:none "${VLLM_REPO}" "${VLLM_SRC}"
-fi
-git -C "${VLLM_SRC}" fetch --depth 1 origin "${VLLM_REF}"
-git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
+for package in (
+    "torch-neuronx",
+    "neuronx-distributed",
+    "neuronx-distributed-inference",
+    "vllm",
+    "vllm-neuron",
+):
+    print(f"{package}={metadata.version(package)}")
 
-VLLM_COMMIT="$(git -C "${VLLM_SRC}" rev-parse HEAD)"
+import neuronx_distributed_inference
+import torch_neuronx
+import vllm
+import vllm_neuron
+
+print("Installed Neuron imports: PASS")
+PY
+
 cat > "${SCRIPT_DIR}/runtime.env" <<EOF
 INFER_VENV=${INFER_VENV}
-EXPERIMENT_VENV=${EXPERIMENT_VENV}
-VLLM_SRC=${VLLM_SRC}
-VLLM_REF=${VLLM_REF}
-VLLM_COMMIT=${VLLM_COMMIT}
 EOF
 
 echo
-echo "Experiment ready at vLLM commit ${VLLM_COMMIT}."
+echo "No vLLM source checkout was created and no package was installed."
 echo "Run the non-compiling compatibility probe:"
 echo "  bash trainium/dspark/run_dspark_probe.sh"
-echo "To attempt engine construction/Neuron compilation afterwards:"
+echo "Attempt the real DSpark configuration (downloads both model checkpoints):"
 echo "  ATTEMPT_ENGINE=1 bash trainium/dspark/run_dspark_probe.sh"
-
+echo "Optionally test the checkpoint as an ordinary NxDI draft model (not DSpark):"
+echo "  ATTEMPT_ENGINE=1 SPECULATIVE_METHOD=draft_model bash trainium/dspark/run_dspark_probe.sh"

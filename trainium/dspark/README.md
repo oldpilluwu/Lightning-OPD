@@ -1,9 +1,17 @@
-# DSpark on Trainium compatibility experiment
+# DSpark on Trainium with the installed vLLM-Neuron stack
 
-This directory tests whether upstream vLLM's DSpark speculative decoder can be
-used through `vllm-neuron`. It is isolated from the working SFT-generation
-environment: the AWS-managed `/opt` environment is inherited read-only and an
-upstream vLLM checkout is exposed only through `PYTHONPATH`.
+This directory probes DSpark without cloning, overlaying, or installing upstream
+vLLM. It uses the vLLM and `vllm-neuron` packages already present in the AWS
+Neuron inference environment and configures the engine for NxD Inference.
+
+DSpark needs two checkpoints:
+
+- target: `Qwen/Qwen3-8B`
+- speculator: `deepseek-ai/dspark_qwen3_8b_block7`
+
+The engine attempt lets Hugging Face/vLLM download both checkpoints. Set
+`TARGET_MODEL` or `SPECULATOR_MODEL` to local checkpoint directories to avoid a
+download or to use an existing cache.
 
 ## Run on the Trainium instance
 
@@ -14,37 +22,59 @@ bash trainium/dspark/setup_experiment.sh
 bash trainium/dspark/run_dspark_probe.sh
 ```
 
-The first probe does not download model weights or compile a model. It checks
-the installed versions, imports the Qwen3 DSpark model and GPU DSpark worker,
-and scans `vllm-neuron` for an integration.
+`setup_experiment.sh` only validates `neuron-ls`, the selected Python
+environment, package versions, and imports. It does not create a virtualenv,
+clone vLLM, or install anything.
 
-Compare with the currently installed vLLM 0.16 stack:
+The default probe is static: it reports whether the installed vLLM includes the
+Qwen3 DSpark model and proposer, and whether `vllm-neuron` contains a DSpark
+integration. Logs are written under `trainium/dspark/logs/`.
 
-```bash
-USE_UPSTREAM_VLLM=0 bash trainium/dspark/run_dspark_probe.sh
-```
-
-Only if the static probe finds Neuron integration, or if you want the exact
-engine failure, request the expensive test explicitly:
+To request a faithful DSpark engine construction:
 
 ```bash
 ATTEMPT_ENGINE=1 bash trainium/dspark/run_dspark_probe.sh
 ```
 
-Defaults for the engine attempt are deliberately tiny (`max_model_len=2048`,
-`max_num_seqs=1`, TP=4). Override them with the corresponding environment
-variables. Logs are written under `trainium/dspark/logs/`.
+The Neuron attempt passes the target and speculator separately through vLLM's
+`speculative_config`, selects the NxD Inference plugin, disables prefix caching,
+uses one contiguous KV-cache slot per compiled sequence, and pins the static
+Neuron graph to `MAX_MODEL_LEN` and `MAX_NUM_SEQS`.
 
-## Expected result
+## Expected compatibility boundary
 
-The current hypothesis is **not yet supported**: recent upstream vLLM contains
-`Qwen3DSparkModel`, but its DSpark proposer lives in the GPU worker tree, while
-the current `vllm-neuron` plugin has no DSpark proposer implementation. The
-probe is intended to verify that boundary against the exact revisions installed
-on the instance rather than treating it as an assumption.
+Upstream DSpark is not an ordinary small causal draft model. Its Qwen3/DFlash
+backbone creates a non-causal query block in parallel, then its Markov head adds
+a token-to-token transition bias while the DSpark proposer samples the block
+sequentially. The proposer currently lives under vLLM's GPU worker tree.
 
-Exit codes 20 and 21 are intentional experimental results:
+The vLLM 0.16 line used by `vllm-neuron` 0.5 does not accept `method="dspark"`.
+The Neuron plugin's fused-speculation loader has special handling for EAGLE but
+does not implement DSpark's non-causal block proposal or Markov head. A faithful
+run should therefore stop before compilation until both pieces are ported to
+NxD Inference/vLLM-Neuron.
 
-- `20`: the selected vLLM revision does not include Qwen3 DSpark.
-- `21`: upstream DSpark exists, but no `vllm-neuron` integration was found.
+For a narrower diagnostic, the checkpoint can be offered to NxDI as a generic
+draft model:
 
+```bash
+ATTEMPT_ENGINE=1 SPECULATIVE_METHOD=draft_model \
+  bash trainium/dspark/run_dspark_probe.sh
+```
+
+This is intentionally labeled **not DSpark**. It only tests checkpoint loading
+through NxDI generic fused speculation. It does not execute DSpark semantics and
+must not be used for performance or correctness claims.
+
+Useful overrides:
+
+```bash
+INFER_VENV=/opt/aws_neuronx_venv_pytorch_inference_vllm_0_16 \
+TP_SIZE=4 MAX_MODEL_LEN=2048 MAX_NUM_SEQS=1 \
+ATTEMPT_ENGINE=1 bash trainium/dspark/run_dspark_probe.sh
+```
+
+Exit codes `20` and `21` are intentional static results:
+
+- `20`: installed vLLM does not contain the Qwen3 DSpark model.
+- `21`: vLLM contains DSpark, but installed `vllm-neuron` has no DSpark hook.

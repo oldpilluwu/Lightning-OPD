@@ -58,6 +58,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speculator-model", default="deepseek-ai/dspark_qwen3_8b_block7"
     )
+    parser.add_argument(
+        "--speculative-method",
+        choices=("dspark", "draft_model"),
+        default="dspark",
+        help=(
+            "dspark requests the faithful upstream algorithm; draft_model is "
+            "only a diagnostic of NxDI generic fused speculation"
+        ),
+    )
     parser.add_argument("--tensor-parallel-size", type=int, default=4)
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--max-num-seqs", type=int, default=1)
@@ -87,7 +96,7 @@ def main() -> int:
         "neuronx_distributed_inference",
         "vllm_neuron",
         "vllm.model_executor.models.qwen3_dspark",
-        "vllm.v1.worker.gpu.spec_decode.dspark",
+        "vllm.v1.worker.gpu.spec_decode.dspark.speculator",
     )
     print("\n=== Import probes ===")
     results: dict[str, bool] = {}
@@ -107,15 +116,22 @@ def main() -> int:
         print(f"  {path}")
 
     model_module = "vllm.model_executor.models.qwen3_dspark"
-    gpu_worker_module = "vllm.v1.worker.gpu.spec_decode.dspark"
+    gpu_worker_module = "vllm.v1.worker.gpu.spec_decode.dspark.speculator"
     if not results.get(model_module):
         print("\nRESULT: this vLLM revision does not contain the Qwen3 DSpark model.")
-        return 20
+        if not args.attempt_engine or args.speculative_method == "dspark":
+            return 20
     if not neuron_hits:
-        print(
-            "\nRESULT: vLLM contains DSpark, but the installed vllm-neuron plugin "
-            "contains no DSpark integration."
-        )
+        if results.get(model_module):
+            print(
+                "\nRESULT: vLLM contains DSpark, but the installed vllm-neuron "
+                "plugin contains no DSpark integration."
+            )
+        else:
+            print(
+                "\nRESULT: neither installed vLLM nor the vllm-neuron plugin "
+                "contains a DSpark integration."
+            )
         print(
             "The implementation is under vLLM's GPU worker; importing that "
             f"module {'succeeded' if results.get(gpu_worker_module) else 'failed'}."
@@ -129,22 +145,44 @@ def main() -> int:
 
     print("\n=== Neuron engine construction ===")
     print("This may download both checkpoints and trigger Neuron compilation.")
+    if args.speculative_method == "draft_model":
+        print(
+            "WARNING: draft_model is not DSpark. It tests whether NxDI can load "
+            "the checkpoint as an ordinary causal draft and does not execute "
+            "DSpark's non-causal block proposal or Markov head."
+        )
     from vllm import LLM
 
+    override_neuron_config = {
+        "max_context_length": args.max_model_len,
+        "seq_len": args.max_model_len,
+        "ctx_batch_size": 1,
+        "batch_size": args.max_num_seqs,
+        "enable_bucketing": False,
+    }
     llm = LLM(
         model=args.target_model,
         tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
+        # With prefix caching disabled, vllm-neuron uses one contiguous cache
+        # allocation per compiled sequence slot.
+        num_gpu_blocks_override=args.max_num_seqs,
+        enable_prefix_caching=False,
+        trust_remote_code=True,
+        additional_config={"override_neuron_config": override_neuron_config},
         speculative_config={
-            "method": "dspark",
+            "method": args.speculative_method,
             "model": args.speculator_model,
             "num_speculative_tokens": args.num_speculative_tokens,
         },
     )
     output = llm.generate(["The capital of France is"], use_tqdm=False)
     print(output[0].outputs[0].text)
-    print("\nRESULT: DSpark generated successfully through the Neuron backend.")
+    if args.speculative_method == "dspark":
+        print("\nRESULT: DSpark generated successfully through the Neuron backend.")
+    else:
+        print("\nRESULT: the DSpark checkpoint loaded as a generic NxDI draft model.")
     return 0
 
 
