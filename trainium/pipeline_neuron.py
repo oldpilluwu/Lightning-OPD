@@ -102,13 +102,30 @@ def run_curation(args: argparse.Namespace) -> None:
             start_idx = pickle.load(f)["next_idx"]
         print(f"{tag} Resuming from index {start_idx}")
 
+    # Qwen3 advertises a ~131K native context. Letting NxD Inference inherit
+    # that value makes compilation and KV-cache allocation needlessly large for
+    # this workload. The paper only needs prompt + 16K generated tokens, so pin
+    # both vLLM and the underlying Neuron config to the requested static shape.
+    override_neuron_config = {
+        "max_context_length": args.max_model_len,
+        "seq_len": args.max_model_len,
+        "ctx_batch_size": 1,
+        "batch_size": args.max_num_seqs,
+        # One exact graph is substantially faster to compile than a bucket set.
+        "enable_bucketing": False,
+    }
     print(f"{tag} Loading model on Neuron: {args.model} "
-          f"(tp={args.tensor_parallel_size}, max_model_len={args.max_model_len})")
-    llm = LLM(
+          f"(tp={args.tensor_parallel_size}, effective context cap="
+          f"{args.max_model_len}, concurrency={args.max_num_seqs}, bucketing=off)")
+    llm_kwargs = dict(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
+        # Prefix caching is disabled below, so the vllm-neuron plugin uses a
+        # contiguous KV cache and requires exactly one block per sequence.
+        num_gpu_blocks_override=args.max_num_seqs,
+        additional_config={"override_neuron_config": override_neuron_config},
         # vLLM V1 enables prefix caching by default, which then asserts that an
         # explicit block_size is set ("When prefix caching is enabled, block_size
         # must be set"). Batch generation over ~unique prompts gains nothing from
@@ -117,6 +134,21 @@ def run_curation(args: argparse.Namespace) -> None:
         enable_prefix_caching=os.environ.get("ENABLE_PREFIX_CACHING", "0") == "1",
         trust_remote_code=True,
     )
+    if args.num_gpu_blocks_override is not None:
+        llm_kwargs["num_gpu_blocks_override"] = args.num_gpu_blocks_override
+    llm = LLM(**llm_kwargs)
+
+    engine = getattr(llm, "llm_engine", None)
+    model_config = getattr(engine, "model_config", None)
+    effective_max_len = getattr(model_config, "max_model_len", None)
+    if effective_max_len is not None and effective_max_len != args.max_model_len:
+        raise RuntimeError(
+            f"vLLM ignored the requested context cap: expected "
+            f"{args.max_model_len}, got {effective_max_len}. Refusing to compile "
+            "the model's full native context."
+        )
+    print(f"{tag} vLLM effective max_model_len="
+          f"{effective_max_len if effective_max_len is not None else args.max_model_len}")
 
     sampling_params = SamplingParams(
         temperature=args.temperature,
@@ -201,6 +233,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-num-seqs", type=int,
                    default=int(os.environ.get("MAX_NUM_SEQS", 8)),
                    help="Continuous-batching slots compiled into the engine.")
+    p.add_argument("--num-gpu-blocks-override", type=int, default=None,
+                   help="vLLM scheduler KV-block count. With Neuron contiguous KV "
+                        "cache and prefix caching disabled, set this exactly to "
+                        "--max-num-seqs.")
 
     # Parallelism
     p.add_argument("--tensor-parallel-size", type=int, default=1,
