@@ -148,14 +148,25 @@ def main():
         rows = rows[: args.num_rows]
     _log(f"Rows to score: {len(rows)}")
 
+    # The Qwen3 flash-attention NKI kernel requires the padded sequence length to
+    # be a multiple of 2048 ("Only support sequence as multiples of 2K"), so round
+    # max_seq_len up to the next 2K boundary.
+    BLK = 2048
+    if args.max_seq_len % BLK != 0:
+        rounded = ((args.max_seq_len + BLK - 1) // BLK) * BLK
+        _log(f"Rounding --max-seq-len {args.max_seq_len} up to {rounded} "
+             f"(flash-attn kernel needs a multiple of {BLK}).")
+        args.max_seq_len = rounded
+
     # Pre-tokenize and enforce the static length up front (before the slow load).
     full = [build_full_ids(r, tokenizer) for r in rows]
     max_full = max((len(f) for f, _ in full), default=0)
     if max_full > args.max_seq_len:
+        need = ((max_full + BLK - 1) // BLK) * BLK
         raise SystemExit(
             f"[Step 4/forward] Longest prompt+response is {max_full} tokens but "
             f"--max-seq-len is {args.max_seq_len}. Re-run with "
-            f"--max-seq-len >= {max_full} (it resumes from finished chunks)."
+            f"--max-seq-len {need} (it resumes from finished chunks)."
         )
     _log(f"Longest sequence {max_full} tokens fits max-seq-len {args.max_seq_len}.")
 
