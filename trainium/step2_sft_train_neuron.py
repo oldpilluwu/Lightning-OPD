@@ -263,6 +263,18 @@ def main():
         data_collator=default_data_collator,
     )
 
+    # optimum-neuron 0.4.3's compute_loss injects reduction="sum" into the model
+    # forward whenever num_items_in_batch is not None (which it is here, because
+    # the model's forward accepts **kwargs so HF sets model_accepts_loss_kwargs).
+    # Its gradient-checkpointing path then threads that kwarg straight into
+    # torch_xla's checkpoint(), which rejects unknown kwargs and dies with
+    # "Unexpected keyword arguments: reduction". Forcing the flag off keeps
+    # num_items_in_batch=None, so nothing injects reduction; the loss falls back
+    # to the per-microbatch token mean averaged over grad-accum steps -- the
+    # LlamaFactory-equivalent SFT normalization we want anyway. Fixed upstream on
+    # optimum-neuron main (checkpoint_with_kwargs); drop this when we bump > 0.4.3.
+    trainer.model_accepts_loss_kwargs = False
+
     ckpts = sorted(Path(args.output_dir).glob("checkpoint-*")) if Path(args.output_dir).exists() else []
     trainer.train(resume_from_checkpoint=bool(ckpts))
 
