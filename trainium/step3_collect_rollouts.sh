@@ -9,8 +9,8 @@
 #   OPD_PROMPTS    - OPD prompt dataset (.jsonl or .parquet)
 #   OUTPUT_DIR     - output directory
 # Optional:
-#   NUM_CORES      - NeuronCores to use (default: 32)
-#   TP_SIZE        - NeuronCores per vLLM worker (default: 8)
+#   NUM_CORES      - logical NeuronCores (default: 4 = one trn2.3xlarge chip)
+#   TP_SIZE        - NeuronCores per vLLM worker (default: 4)
 
 set -euo pipefail
 
@@ -22,8 +22,8 @@ SFT_CHECKPOINT="$(cd "$(dirname "${SFT_CHECKPOINT}")" && pwd)/$(basename "${SFT_
 OPD_PROMPTS="$(cd "$(dirname "${OPD_PROMPTS}")" && pwd)/$(basename "${OPD_PROMPTS}")"
 OUTPUT_DIR="$(mkdir -p "${OUTPUT_DIR}" && cd "${OUTPUT_DIR}" && pwd)"
 
-NUM_CORES="${NUM_CORES:-32}"
-TP_SIZE="${TP_SIZE:-8}"
+NUM_CORES="${NUM_CORES:-4}"
+TP_SIZE="${TP_SIZE:-4}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 bash "${SCRIPT_DIR}/run_curation_neuron.sh" \

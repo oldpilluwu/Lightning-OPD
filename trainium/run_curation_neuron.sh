@@ -5,14 +5,15 @@
 #
 # Launches one independent vLLM-on-Neuron worker per group of NeuronCores.
 # Device isolation uses NEURON_RT_VISIBLE_CORES (the Neuron equivalent of
-# CUDA_VISIBLE_DEVICES). A trn1.32xlarge exposes 32 NeuronCores (0-31).
+# CUDA_VISIBLE_DEVICES). A trn2.3xlarge exposes 4 logical NeuronCores (0-3)
+# under the default LNC=2 config; a trn1.32xlarge exposes 32 (0-31).
 #
 #   bash trainium/run_curation_neuron.sh \
 #       --model Qwen/Qwen3-8B \
 #       --input data.jsonl \
 #       --output-dir output/ \
-#       --num-cores 32 \
-#       --tensor-parallel-size 8      # -> 4 workers x 8 cores
+#       --num-cores 4 \
+#       --tensor-parallel-size 4      # -> 1 worker x 4 cores (trn2.3xlarge)
 #
 # Environment variables (optional):
 #   NUM_NODES / NODE_RANK - multi-instance sharding (default: 1 / 0)
@@ -21,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-NUM_CORES=32
+NUM_CORES=4
 TP=1
 PIPELINE_ARGS=()
 
@@ -38,6 +39,11 @@ done
 
 NUM_NODES="${NUM_NODES:-1}"
 NODE_RANK="${NODE_RANK:-0}"
+if (( NUM_CORES % TP != 0 )); then
+    echo "ERROR: --num-cores (${NUM_CORES}) must be divisible by --tensor-parallel-size (${TP})." >&2
+    echo "       Otherwise workers-per-node floors and some NeuronCores go unused / mis-sharded." >&2
+    exit 1
+fi
 WORKERS_PER_NODE=$(( NUM_CORES / TP ))
 WORLD_SIZE=$(( WORKERS_PER_NODE * NUM_NODES ))
 

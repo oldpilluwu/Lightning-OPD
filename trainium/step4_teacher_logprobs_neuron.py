@@ -25,12 +25,15 @@ with the smoke test in SETUP.md before launching the full run.
 
 import argparse
 import math
+import os
 from pathlib import Path
 
 import pandas as pd
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
+
+DEBUG = os.environ.get("OPD_DEBUG", "0") == "1"
 
 
 def parse_args():
@@ -42,8 +45,8 @@ def parse_args():
                    help="Phase 1 output: <stem>-lightning-opd.parquet")
     p.add_argument("--output-parquet", required=True,
                    help="Final output: <stem>-lightning-opd-precomputed.parquet")
-    p.add_argument("--tensor-parallel-size", type=int, default=8,
-                   help="NeuronCores for the teacher engine.")
+    p.add_argument("--tensor-parallel-size", type=int, default=4,
+                   help="NeuronCores for the teacher engine (4 = one trn2.3xlarge chip).")
     p.add_argument("--max-model-len", type=int, default=8192,
                    help="Matches the original teacher server context length.")
     p.add_argument("--max-num-seqs", type=int, default=8)
@@ -69,6 +72,29 @@ def main():
     print(f"[Step 4] {num_chunks} chunks total, {len(pending)} pending")
 
     if pending:
+        # Fail fast BEFORE the expensive model load: vLLM's generate needs at
+        # least one output token (max_tokens=1), so a scored sequence must fit
+        # the context with one token of headroom, i.e. len(full_ids) <=
+        # max_model_len - 1. (The original sglang path used max_new_tokens=0 and
+        # could score a context-filling sequence; on vLLM we need the headroom.)
+        # Check the whole dataset up front so we don't abort mid-run after
+        # scoring several chunks.
+        max_full = 0
+        for row in rows:
+            meta = row["metadata"]
+            n = (len(tokenizer.encode(row["prompt"], add_special_tokens=False))
+                 + len(meta["response_tokens"]))
+            max_full = max(max_full, n)
+        if max_full >= args.max_model_len:
+            raise SystemExit(
+                f"[Step 4] Longest prompt+response is {max_full} tokens, but "
+                f"--max-model-len is {args.max_model_len} and vLLM needs "
+                f"len(full_ids) <= max_model_len - 1. Re-run with "
+                f"--max-model-len >= {max_full + 1} (it resumes from finished chunks)."
+            )
+        print(f"[Step 4] Longest sequence {max_full} tokens fits max-model-len "
+              f"{args.max_model_len}.")
+
         print(f"[Step 4] Loading teacher on Neuron: {args.teacher_model} "
               f"(tp={args.tensor_parallel_size})")
         llm = LLM(
@@ -91,9 +117,11 @@ def main():
                 prompt_ids = tokenizer.encode(row["prompt"], add_special_tokens=False)
                 response_ids = [int(x) for x in meta["response_tokens"]]
                 full_ids = prompt_ids + response_ids
+                # Defensive: the up-front scan already guaranteed this fits.
                 assert len(full_ids) < args.max_model_len, (
-                    f"Sequence of {len(full_ids)} tokens exceeds --max-model-len "
-                    f"{args.max_model_len}; increase it and re-run."
+                    f"Sequence of {len(full_ids)} tokens does not leave room for "
+                    f"vLLM's 1 output token within --max-model-len {args.max_model_len}; "
+                    f"re-run with --max-model-len >= {len(full_ids) + 1}."
                 )
                 prompts.append(TokensPrompt(prompt_token_ids=full_ids))
                 response_lens.append(len(response_ids))
@@ -110,6 +138,30 @@ def main():
                        for i in range(1, len(token_ids))][-rlen:]
                 assert len(lps) == rlen, f"Expected {rlen} logprobs, got {len(lps)}"
                 chunk_lps.append(lps)
+
+            if DEBUG and c == pending[0] and outputs:
+                # Alignment proof on the first scored row: the logprob we keep
+                # for response position j must be the logprob of the *response*
+                # token itself, and the slice must cover exactly the last rlen
+                # positions of the full sequence.
+                out0, rlen0 = outputs[0], response_lens[0]
+                token_ids = out0.prompt_token_ids
+                total = len(token_ids)
+                resp_ids = token_ids[total - rlen0:]
+                lp0 = chunk_lps[0]
+                print(f"[Step 4][DEBUG] row {lo}: prompt+resp tokens={total}, "
+                      f"response tokens={rlen0}, kept logprobs={len(lp0)}")
+                print(f"[Step 4][DEBUG]   first response token id={resp_ids[0]} "
+                      f"({tokenizer.decode([resp_ids[0]])!r}), teacher_lp={lp0[0]:.4f}")
+                print(f"[Step 4][DEBUG]   last response token id={resp_ids[-1]} "
+                      f"({tokenizer.decode([resp_ids[-1]])!r}), teacher_lp={lp0[-1]:.4f}")
+                import statistics
+                flat = [x for row_lp in chunk_lps for x in row_lp]
+                bad = sum(1 for x in flat if x != x or x == float("-inf"))  # NaN/-inf
+                print(f"[Step 4][DEBUG]   chunk logprob stats: "
+                      f"mean={statistics.fmean(flat):.4f}, min={min(flat):.4f}, "
+                      f"max={max(flat):.4f}, nan/-inf count={bad} "
+                      f"(logprobs should be <= 0)")
 
             pd.DataFrame({"row_idx": list(range(lo, hi)),
                           "teacher_log_probs": chunk_lps}) \

@@ -1,8 +1,18 @@
 # Lightning OPD on AWS Trainium — Setup Guide
 
 This guide takes you from a fresh AWS account to a trained Lightning-OPD model
-(Qwen3-4B or Qwen3-8B scale) on AWS Trainium, using the scripts in
-[`trainium/`](trainium/).
+on AWS Trainium, using the scripts in [`trainium/`](trainium/). It targets a
+single **`trn2.3xlarge`** (one Trainium2 chip) running the **Qwen3-4B** scale.
+
+> **Scale note.** The **4B** scale (student Qwen3-4B-Base, teacher Qwen3-8B)
+> fits on one trn2.3xlarge chip. The **8B** scale does **not**: a Qwen3-8B
+> full fine-tune needs ~128 GB and one chip has only 96 GiB of HBM, and a
+> single chip has no data-parallel dimension to shard optimizer state across
+> (raising tensor-parallel size splits tensors within the *same* HBM pool, so
+> it does not add capacity). For 8B, use a larger instance (e.g.
+> trn1.32xlarge / trn2.48xlarge with `NUM_CORES`/`TRAIN_TP` raised) — the same
+> scripts scale up — or a parameter-efficient (LoRA) variant, which is not
+> wired up here yet.
 
 > **Read this first — what this port is and isn't.**
 > The original pipeline runs on CUDA (vLLM, LlamaFactory, sglang,
@@ -23,49 +33,68 @@ This guide takes you from a fresh AWS account to a trained Lightning-OPD model
 > These scripts were written against **Neuron SDK ≥ 2.24** (Qwen3 support in
 > NxD Inference) and **optimum-neuron ≥ 0.3.0** (Qwen3 training support) and
 > have **not been validated on real Trainium hardware** — run the smoke test
-> (§7) before committing to the full run. The two known risk points are
-> called out in §10 (Troubleshooting).
+> (§7) before committing to the full run. On **Trainium2 (trn2.x)** use a
+> recent SDK; the defaults assume the single-chip `trn2.3xlarge` (4 logical
+> NeuronCores, 96 GiB) and the 4B scale — see §1 for scaling up and for why
+> 8B needs a larger instance. The known risk points are in §10.
 
 ---
 
 ## 1. Choose instance type and region
 
-Everything runs on **one `trn1.32xlarge`** (16 Trainium1 chips = 32
-NeuronCores, 512 GB accelerator memory, 128 vCPUs, ~$21.50/hr on-demand).
+Everything (4B scale) runs on **one `trn2.3xlarge`**: a single Trainium2 chip
+with **8 physical NeuronCores exposed as 4 logical NeuronCores** (the default
+LNC=2 config groups two physical cores into one logical core), **96 GiB HBM**,
+and ~24 vCPUs. Confirm the core count on the instance with `neuron-ls`.
 
-- Regions with Trn1: **us-east-1 (N. Virginia)**, **us-east-2 (Ohio)**,
-  **us-west-2 (Oregon)**. Pick one and stay in it.
-- `trn2.48xlarge` (Trainium2, ~4x faster) also works with the same scripts
-  if you have access, but it is more expensive and quota is harder to get.
-- Do **not** try `trn1.2xlarge` — a single chip (2 cores × 16 GB) cannot hold
-  the models with optimizer state.
+- Because the chip presents **4 logical cores**, the scripts default to
+  `NUM_CORES=4` and tensor-parallel size `4` (one worker uses the whole chip;
+  there is no data-parallel dimension). Do not set these above 4 on this
+  instance.
+- Regions with Trn2: **us-east-1 (N. Virginia)**, **us-east-2 (Ohio)**,
+  **us-west-2 (Oregon)**. Pick one and stay in it. Trn2 quota is often only
+  available via **EC2 Capacity Blocks for ML** — check availability before
+  planning a long run.
+- Scaling up: the same scripts run on **trn1.32xlarge** (32 logical cores,
+  512 GB) or **trn2.48xlarge** (64 logical cores) — set `NUM_CORES` and
+  `TRAIN_TP`/`GEN_TP` accordingly. This is required for the **8B** scale,
+  which does not fit on one chip (see the scale note at the top).
+- Do **not** try `trn1.2xlarge` — a single Trainium1 chip (2 cores × 16 GB)
+  cannot hold even the 4B model with optimizer state.
 
-Rough budget (full-scale reproduction, on-demand pricing — the dominant cost
-is step 1 generating 300k × up-to-16k-token responses):
+Rough budget for the **4B** scale on one trn2.3xlarge (on-demand; the dominant
+cost is step 1 generating 300k × up-to-16k-token responses). A single chip is
+a small slice of a full node, so the full-scale run is slow — the smoke test
+(§7) or a reduced `SFT_SAMPLES`/`OPD_STEPS` run is the practical path:
 
-| Scale | Step 1 (data gen) | Step 2 (SFT) | Steps 3–4 | Step 5 (OPD) | Total (very rough) |
-|---|---|---|---|---|---|
-| 4B (teacher 8B) | ~40–60 h | ~30–45 h | ~8–12 h | ~3–5 h | **~80–120 h ≈ $1.7k–2.6k** |
-| 8B (teacher 32B) | ~90–140 h | ~50–70 h | ~15–25 h | ~5–8 h | **~160–240 h ≈ $3.5k–5.2k** |
+| Stage | Wall-clock (very rough, 1 chip) |
+|---|---|
+| Step 1 (300k SFT gen) | days — reduce `SFT_SAMPLES` for a real budget |
+| Step 2 (SFT) | many hours–days at 3000 steps |
+| Steps 3–4 (rollouts + teacher scoring) | hours |
+| Step 5 (OPD, ~150 steps) | hours |
 
-The paper's numbers (20/30 GPU-hours) are for the OPD stage only, on H100s.
+The paper's numbers (20/30 GPU-hours) are for the OPD stage only, on 8×H100.
 If you only want to validate the pipeline, run the smoke test first (§7,
-a few hours, <$100).
+64 SFT / 64 rollouts / 8 steps each, real config on a small dataset).
 
 ## 2. Request quota (AWS Console)
 
-New accounts have **zero** Trn1 quota. Do this first — approval can take a
+New accounts have **zero** Trn quota. Do this first — approval can take a
 few hours to a couple of days.
 
 1. Sign in to the AWS Console, set your region (top-right) to e.g. **us-east-2**.
 2. Search bar → **Service Quotas** → **AWS services** → **Amazon Elastic
    Compute Cloud (Amazon EC2)**.
 3. Search the quota list for **"Running On-Demand Trn instances"**.
-4. **Request increase at account level** → enter **128** (vCPUs; a
-   trn1.32xlarge uses all 128). Submit.
+4. **Request increase at account level** → enter enough vCPUs for the
+   instance you want (a **trn2.3xlarge** uses ~24; a trn1.32xlarge uses 128).
+   Submit.
 5. Watch status under *Quota request history*. If it stalls, open a Support
    case (Support Center → Create case → Service limit increase) and mention
-   you're running an ML training job.
+   you're running an ML training job. Note: Trn2 capacity is frequently only
+   offered through **EC2 Capacity Blocks for ML** rather than plain
+   on-demand — if on-demand launch fails, reserve a Capacity Block instead.
 
 ## 3. Create a key pair
 
@@ -81,29 +110,31 @@ few hours to a couple of days.
 ## 4. Launch the instance (AWS Console)
 
 1. Console → **EC2** → **Launch instance**.
-2. **Name**: `lightning-opd-trn1`.
+2. **Name**: `lightning-opd-trn2`.
 3. **Application and OS Images (AMI)** → *Browse more AMIs* → search
    **"Deep Learning AMI Neuron"** → pick
    **Deep Learning AMI Neuron (Ubuntu 22.04)** (the multi-framework Neuron
    DLAMI; it ships the Neuron driver, runtime, and the PyTorch/NxD-Inference
-   virtualenvs the scripts expect).
-4. **Instance type**: `trn1.32xlarge`.
+   virtualenvs the scripts expect). Make sure its Neuron SDK is recent enough
+   for Trainium2 + Qwen3 (SDK ≥ 2.24; newer is better for Trn2 support).
+4. **Instance type**: `trn2.3xlarge`.
 5. **Key pair**: `trainium-key`.
 6. **Network settings** → Edit:
    - Keep the default VPC/subnet, **Auto-assign public IP: Enable**.
    - Security group: *Create security group*, allow **SSH (22)** with source
      **My IP** only.
-7. **Configure storage**: set the root volume to **2000 GiB, gp3** (the
-   300k-sample SFT dataset + checkpoints + Neuron compile cache need room;
-   1000 GiB is enough for the smoke test). Optionally raise gp3 throughput
-   to 500 MB/s.
+7. **Configure storage**: set the root volume to **1000 GiB, gp3** (checkpoints
+   + Neuron compile cache + a reduced SFT dataset; go to **2000 GiB** if you
+   run the full 300k-sample generation). Optionally raise gp3 throughput to
+   500 MB/s.
 8. **Launch instance**. Wait until *Instance state = Running* and note the
    **Public IPv4 address** from the instance details page.
 
-> 💡 Cost control: this instance bills ~$21.50/hr while running. **Stop** it
-> (EC2 → Instance state → Stop) whenever you're not training — the EBS
-> volume (and all your data) persists across stop/start; only the public IP
-> changes. The resumable pipeline picks up where it left off.
+> 💡 Cost control: **Stop** the instance (EC2 → Instance state → Stop)
+> whenever you're not training — the EBS volume (and all your data) persists
+> across stop/start; only the public IP changes. The resumable pipeline picks
+> up where it left off. (If you reserved a Capacity Block, note it bills for
+> the whole reserved window regardless of stop/start.)
 
 ## 5. Connect and set up
 
@@ -111,7 +142,10 @@ few hours to a couple of days.
 ssh -i ~/Downloads/trainium-key.pem ubuntu@<PUBLIC_IP>
 ```
 
-Verify the accelerators — you should see 16 devices / 32 NeuronCores:
+Verify the accelerator — on a trn2.3xlarge you should see **1 device**, and
+under the default LNC=2 config **4 logical NeuronCores** (this is the number
+the scripts use for `NUM_CORES`). If `neuron-ls` reports a different logical
+core count, set `NUM_CORES`/`TRAIN_TP`/`GEN_TP` to match it.
 
 ```bash
 neuron-ls
@@ -156,6 +190,57 @@ echo 'export WANDB_API_KEY=<your-key>' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+### 5a. Giving teammates access (shared `ubuntu` account)
+
+For a small trusted team it's simplest for everyone to share the default
+`ubuntu` account and authenticate with their own SSH keys — no per-user
+accounts, no IAM needed. Two steps:
+
+**1. Open SSH to the team in the security group.** EC2 → select the instance →
+**Security** tab → click the security group → **Edit inbound rules** → the
+SSH/22 rule → set the **Source** to your VPN/office CIDR (ask your admin, e.g.
+`10.0.0.0/16`), or add one rule per teammate IP as `x.x.x.x/32`. Avoid
+`0.0.0.0/0` unless you must — this is an expensive box and password auth should
+stay disabled (it is by default on the DLAMI; keep it that way).
+
+**2. Add each teammate's public key.** Each teammate generates a key on *their*
+machine and sends you the **public** half only (never the private key):
+
+```bash
+ssh-keygen -t ed25519 -C "alice@org"
+cat ~/.ssh/id_ed25519.pub        # send this one line
+```
+
+You (logged in with the launch key as `ubuntu`) append them all to the shared
+`authorized_keys`:
+
+```bash
+cat >> ~/.ssh/authorized_keys <<'EOF'
+ssh-ed25519 AAAA...alice... alice@org
+ssh-ed25519 AAAA...bob...   bob@org
+EOF
+```
+
+Everyone then connects as the same user with their own key:
+
+```bash
+ssh ubuntu@<PUBLIC_IP>
+```
+
+What sharing one account means in practice:
+
+- The `-C "alice@org"` **key comment is the only way to tell whose key is
+  whose** — keep it meaningful. To revoke someone, delete their line.
+- **No per-person audit** — everything runs as `ubuntu`, and everyone has that
+  user's passwordless sudo, so anyone can modify or kill anyone else's runs.
+  Fine for a trusted team; not for anything sensitive.
+- **Always run training inside a *shared* `tmux`** so a dropped SSH session
+  doesn't kill a multi-day job and teammates can attach to the same view:
+  ```bash
+  tmux new -s opd          # first person starts it
+  tmux attach -t opd       # everyone else attaches to the same session
+  ```
+
 ## 6. Smoke-test the two risk points (15–30 min, do not skip)
 
 **(a) Qwen3 generation on Neuron** — verifies the vLLM Neuron plugin +
@@ -194,23 +279,49 @@ tmux new -s opd
 cd ~/Lightning-OPD
 ```
 
-**Recommended first: end-to-end smoke run** (5k SFT samples, 2k rollouts,
-20 OPD steps — validates every stage cheaply):
+**Recommended first: end-to-end smoke run** — a *faithful mini-run*. It uses
+the **same config as the real run** (generation length 16384, SFT packing
+`CUTOFF_LEN=16384`, OPD sequence length 5632, learning rates, schedules,
+warmup, betas all unchanged), so it compiles the same Neuron graphs, hits the
+same memory footprint, and exercises the same code paths. Only the **dataset**
+is smaller — 64 SFT prompts / 64 rollouts — and the step count is short
+(8 SFT + 8 OPD steps). The one unavoidable deviation is the global batch size:
+a 256-sequence batch can't be built from 64 samples, so `SFT_GBS`/`OPD_GBS` are
+scaled to 8 (this changes only the gradient-accumulation count, not any
+compiled shape or hyperparameter):
 
 ```bash
 SCALE=4b SMOKE=1 bash trainium/run_pipeline.sh
 ```
 
-**Full 4B reproduction** (student Qwen3-4B-Base, teacher Qwen3-8B):
+Because the shapes match the real run, if step 2 or 5 OOMs in the smoke run it
+will OOM in the full run too — lower `CUTOFF_LEN` / `MAX_SEQ_LEN` for both.
+
+The smoke run turns on `OPD_DEBUG=1`, which prints diagnostics tagged
+`[DEBUG]` at each step so you can spot problems without hardware traces:
+prompt/chat structure and a sample generation (steps 1/3); the
+prompt→response boundary, label masking, and packed-block padding/supervision
+stats (step 2); teacher-logprob alignment and distribution stats (step 4); and
+dataset alignment plus a one-time student-vs-teacher logprob/advantage dump
+inside the loss (step 5). Set `OPD_DEBUG=1` on a full run too if you want the
+same output. Smoke knobs: `SFT_GBS` / `OPD_GBS` (global batch, default 8),
+`SFT_STEPS` / `OPD_STEPS` (default 8). Everything else tracks the real-run
+defaults below.
+
+**Full 4B reproduction** (student Qwen3-4B-Base, teacher Qwen3-8B) — the
+supported single-chip path:
 
 ```bash
 SCALE=4b bash trainium/run_pipeline.sh
 ```
 
-**Full 8B reproduction** (student Qwen3-8B-Base, teacher Qwen3-32B):
+**8B scale** (student Qwen3-8B-Base, teacher Qwen3-32B): does **not** fit on
+one trn2.3xlarge chip (see the scale note in §1) — `run_pipeline.sh` refuses
+it with `NUM_CORES<=4`. Run it on a larger instance instead, e.g. a
+trn1.32xlarge:
 
 ```bash
-SCALE=8b bash trainium/run_pipeline.sh
+NUM_CORES=32 TRAIN_TP=8 GEN_TP=8 SCALE=8b bash trainium/run_pipeline.sh
 ```
 
 The script runs step 0 → 6 in order, switching venvs automatically. Each
@@ -231,72 +342,88 @@ Useful knobs (env vars for `run_pipeline.sh`):
 
 | Var | Default | Meaning |
 |---|---|---|
-| `SFT_SAMPLES` | 300000 | SFT prompts sampled from OpenThoughts3-1.2M |
+| `NUM_CORES` | 4 | Logical NeuronCores (4 = one trn2.3xlarge chip; 32 for trn1.32xlarge) |
+| `TRAIN_TP` | 4 | Tensor-parallel size for SFT/OPD (must divide `NUM_CORES`) |
+| `GEN_TP` | `NUM_CORES` | NeuronCores per vLLM worker in generation/scoring |
+| `SFT_SAMPLES` | 300000 | SFT prompts sampled from OpenThoughts3-1.2M (reduce on 1 chip) |
 | `SFT_STEPS` | 3000 | SFT optimizer steps (paper value) |
 | `OPD_STEPS` | 150 | Lightning OPD steps (README: ~150 converges; paper config caps at 3000) |
-| `GEN_TP` | 8 | NeuronCores per vLLM worker in generation/scoring |
 | `SFT_GBS` | 256 (4b) / 128 (8b) | SFT global batch (matches LlamaFactory configs) |
-| `CUTOFF_LEN` | 16384 | SFT packed sequence length (lower to 8192 if OOM) |
+| `CUTOFF_LEN` | 16384 (paper; unchanged in smoke) | SFT packed sequence length — main OOM lever on one chip; drop to 8192/4096 if step 2 OOMs |
+| `OPD_DEBUG` | 0 (1 in smoke) | Print `[DEBUG]` diagnostics at every step (prompt/label alignment, dataset structure, logprob stats) |
 
-## 8. Deciding when SFT is enough (OPD readiness probe)
+## 8. Choosing the SFT checkpoint
 
-The pipeline builds a **frozen probe set** before SFT starts
-(`data/probe/opd_probe_<teacher>.parquet`): the teacher generates responses
-on 64 held-out OPD prompts (DAPO-Math-17k) and scores its own tokens at
-temperature 0 (same semantics as step 4). During SFT — and again during OPD —
-the student is evaluated on this probe every `PROBE_EVERY` steps (default 5;
-set `PROBE_EVERY=1` for literally every step at ~2–5% extra wall time).
+Run SFT for the paper's step count (`SFT_STEPS`, default 3000) and use the
+resulting checkpoint for steps 3–5. `run_pipeline.sh` consolidates the final
+SFT checkpoint automatically; if you want an earlier one, any
+`checkpoints/<sft-dir>/checkpoint-<step>` (written every `save_steps`) can be
+consolidated the same way. Watch the ordinary SFT train loss for a smooth,
+plateauing curve; if it is still falling steadily at step 3000, extend
+`SFT_STEPS`.
 
-Metrics land in `<checkpoint_dir>/opd_probe_log.jsonl`, stdout, and wandb
-(`opd_probe/*`) if enabled:
+## 9. S3 for datasets and checkpoints
 
-| Metric | Meaning |
-|---|---|
-| `student_nll` | Student per-token NLL on teacher responses to OPD prompts — "how surprised is the student by what the teacher would say". |
-| `teacher_nll` | Teacher NLL on its own tokens (constant; its sampling entropy). Floor for `student_nll`. |
-| `fwd_kl` | `student_nll − teacher_nll` = Monte-Carlo estimate of per-token KL(teacher‖student) on the OPD domain. **The decision metric.** |
-| `drift_mean` / `drift_abs` | Signed / absolute change in student token logprobs since the previous probe — how much the policy moved between probes. |
-| `top1_match` | Fraction of teacher tokens that are the student's argmax. |
+The pipeline reads and writes the instance's **local** `data/` and
+`checkpoints/` directories — it does not talk to S3 itself. S3 is used
+alongside it, for two things: **seeding/sharing the dataset** and **backing up
+checkpoints** so nothing is lost when the instance is stopped or terminated
+(and so teammates can pull the results).
 
-**Decision rule — move from SFT to OPD when:**
+### 9a. Create a bucket (once)
 
-1. `fwd_kl` has **plateaued**: less than ~1–2% relative improvement over the
-   last few hundred steps (compare checkpoints at `save_steps` boundaries), **and**
-2. `drift_abs` is still clearly non-zero — i.e., SFT is still changing the
-   policy, just not moving it closer to the teacher. Continuing past this
-   point buys nothing on the OPD domain and risks drifting the student away
-   from its own rollout distribution.
-
-Also sanity-check `top1_match` (should have flattened) and the ordinary SFT
-train loss (should be smooth). If `fwd_kl` is still falling steadily at step
-3000, the paper's step count is binding you — extend `SFT_STEPS`.
-
-Pick the SFT checkpoint at (or just after) the plateau point for steps 3–5,
-not necessarily the last one: `checkpoints/<sft-dir>/checkpoint-<step>` can be
-consolidated the same way as the final model.
-
-Quick plot on the instance:
+From any machine with AWS access, or from the instance once credentials are set
+(9b):
 
 ```bash
-python3 - <<'PY'
-import json
-rows = [json.loads(l) for l in open("checkpoints/qwen3-4b-base-sft-qwen3-8b/opd_probe_log.jsonl")]
-for r in rows[-30:]:
-    bar = "#" * int(max(0, r["fwd_kl"]) * 40)
-    print(f"step {r['step']:5d}  fwd_kl {r['fwd_kl']:.4f}  "
-          f"drift_abs {r.get('drift_abs', float('nan')):.4f}  "
-          f"top1 {r['top1_match']:.3f}  {bar}")
-PY
+aws s3 mb s3://<your-org>-lightning-opd --region us-east-2   # match your instance region
 ```
 
-The same probe keeps running during step 5, so you can watch OPD push
-`fwd_kl` below the level SFT plateaued at — that drop is the Lightning-OPD
-gain, visible before you run any benchmark. (Note: OPD optimizes *reverse*
-KL on student rollouts, while `fwd_kl` measures forward KL on teacher
-samples — related but not identical quantities, so expect improvement, not
-monotone descent to zero.)
+Bucket names are globally unique — prefix with your org/username. Keep the
+bucket in the **same region** as the instance so transfers are fast and free of
+cross-region egress cost.
 
-## 9. Get the final model + back up to S3
+### 9b. Give the instance credentials
+
+The AWS CLI is preinstalled on the DLAMI but has no credentials by default.
+Two ways:
+
+- **IAM role (preferred, no keys on disk)** — EC2 → select instance → Actions →
+  Security → **Modify IAM role** → attach a role granting S3 access to this
+  bucket. Nothing else to configure; `aws s3` just works.
+- **Access key (if you can't create/attach a role)** — from your AWS console,
+  **Security credentials → Create access key**, then on the instance:
+  ```bash
+  aws configure    # paste Access Key ID, Secret, region (us-east-2), output=json
+  ```
+  This writes `~/.aws/credentials`. On a **shared instance** (§5a) this key is
+  readable by every teammate using the `ubuntu` account, so scope it to just
+  this bucket and rotate/delete it when you tear down. Verify with:
+  ```bash
+  aws s3 ls s3://<your-org>-lightning-opd
+  ```
+
+### 9c. Dataset — push once, pull on each new instance
+
+If you've already generated/curated the SFT data (steps 0–1) and don't want to
+regenerate it (the dominant cost — days on one chip), upload it and re-pull it
+on any future instance:
+
+```bash
+# after generating, from the instance:
+aws s3 sync data/ s3://<your-org>-lightning-opd/data/
+
+# on a fresh instance, before running the pipeline:
+cd ~/Lightning-OPD
+aws s3 sync s3://<your-org>-lightning-opd/data/ data/
+```
+
+Because the pipeline is resumable via the markers under
+`data/.pipeline_state/`, restoring `data/` (including those markers) lets a new
+instance **skip stages that were already done**. Sync `data/` up periodically
+during long runs so a terminated instance doesn't lose completed generation.
+
+### 9d. Checkpoints — back up before terminating
 
 The pipeline ends with a consolidated HuggingFace-format model at:
 
@@ -304,19 +431,20 @@ The pipeline ends with a consolidated HuggingFace-format model at:
 checkpoints/qwen3-4b-lightning-opd-hf/    # or qwen3-8b-...
 ```
 
-Back it up before terminating anything:
+Back it up before terminating anything (and periodically, to survive a crash):
 
 ```bash
-aws s3 mb s3://<your-bucket>-lightning-opd
-aws s3 sync checkpoints/qwen3-4b-lightning-opd-hf s3://<your-bucket>-lightning-opd/qwen3-4b-lightning-opd-hf
+aws s3 sync checkpoints/ s3://<your-org>-lightning-opd/checkpoints/
 ```
 
-(If `aws s3` complains about credentials: EC2 console → select instance →
-Actions → Security → Modify IAM role → attach a role with S3 write access;
-or run `aws configure` with an access key.)
+Teammates or a future instance pull it back with the reverse `sync`. The
+checkpoint loads with vLLM/transformers on any hardware — evaluation (AIME /
+HMMT / LiveCodeBench) is not part of this repo's pipeline.
 
-Evaluation (AIME / HMMT / LiveCodeBench) is not part of this repo's pipeline;
-the checkpoint loads with vLLM/transformers on any hardware.
+> 💡 `aws s3 sync` is incremental (only changed files) and safe to re-run, so
+> it's well suited to a periodic `data/` + `checkpoints/` backup during long
+> runs — e.g. drop it in a `while true; do aws s3 sync … ; sleep 3600; done`
+> in a spare tmux pane.
 
 ## 10. Troubleshooting
 
@@ -331,7 +459,7 @@ the checkpoint loads with vLLM/transformers on any hardware.
   the actual next token) via `transformers` on `torch_xla` — open an issue or
   ask for `--backend xla` to be added to `step4_teacher_logprobs_neuron.py`;
   the math is 15 lines, the missing part is only teacher-size tensor
-  parallelism on trn1.
+  parallelism.
 - **optimum-neuron API drift (steps 2/5)**: the trainer scripts follow the
   optimum-neuron 0.3.x training API (`NeuronTrainingArguments(tensor_parallel_size=…)`,
   `NeuronModelForCausalLM.from_pretrained(model_id, training_args.trn_config)`).
@@ -339,16 +467,21 @@ the checkpoint loads with vLLM/transformers on any hardware.
   https://huggingface.co/docs/optimum-neuron/training_tutorials/finetune_qwen3
   and adjust the few construction lines — the datasets, loss, and
   hyperparameters don't need to change.
-- **Device OOM in step 2**: lower `CUTOFF_LEN` to 8192 (halves activation
-  memory; slightly changes packing but not the data), or raise `TP_SIZE`
-  to 16.
-- **Device OOM in step 5**: raise `TP_SIZE` (the default 8 is conservative
-  for 4B; 8B may need 16 on trn1), or reduce `--max-seq-len` if your rollouts
-  have short prompts.
-- **HBM OOM or hangs in generation (steps 1/3)**: reduce `MAX_NUM_SEQS`
+- **Device OOM in step 2/5 (training)**: on a single trn2.3xlarge chip,
+  raising `TRAIN_TP` does **not** help — with `NUM_CORES=4` there is no
+  data-parallel dimension, and TP only splits tensors within the same 96 GiB
+  HBM pool. Instead lower `CUTOFF_LEN` (16384 → 8192 → 4096 each halves
+  activation memory; changes packing but not the data) for step 2, and lower
+  `MAX_SEQ_LEN` for step 5. If 4B full FT still OOMs, the model+optimizer
+  footprint is too large for one chip — move to a multi-chip instance
+  (`NUM_CORES=32 TRAIN_TP=8`) where ZeRO-1 can shard optimizer state across
+  the data-parallel ranks. (On a bigger box, raising `TRAIN_TP` *does* help,
+  as does adding DP.)
+- **HBM OOM or hangs in generation (steps 1/3/4)**: reduce `MAX_NUM_SEQS`
   (default 8) or `MAX_MODEL_LEN` (default 18432; 4096-token rollouts for
   step 3 only need ~6144 — set `MAX_MODEL_LEN=6144` there to speed up
-  compilation substantially).
+  compilation substantially). The Qwen3-32B teacher (8B scale) barely fits a
+  single chip even at TP=4 — prefer a larger instance for 8B teacher scoring.
 - **Instance won't launch: `VcpuLimitExceeded`** — quota (§2) not granted
   yet, or granted in a different region.
 - **`neuron-ls` shows nothing** — wrong AMI (must be a *Neuron* DLAMI) or

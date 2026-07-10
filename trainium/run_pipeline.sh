@@ -3,22 +3,34 @@
 #
 # Lightning OPD on AWS Trainium — single resumable entrypoint.
 #
-# Runs the full pipeline (steps 0-6) for one scale on one trn1.32xlarge /
-# trn2.48xlarge instance. Every stage writes a marker into
-# data/.pipeline_state/ when it completes; re-running the script resumes at
-# the first unfinished stage (and the generation / scoring stages also resume
-# mid-stage from their own checkpoints).
+# Runs the full pipeline (steps 0-6) for one scale on a single Trainium
+# instance. Defaults target trn2.3xlarge (1 Trainium2 chip); override
+# NUM_CORES / TRAIN_TP / GEN_TP for a bigger box (see the profile block
+# below). Every stage writes a marker into data/.pipeline_state/ when it
+# completes; re-running the script resumes at the first unfinished stage
+# (and the generation / scoring stages also resume mid-stage from their own
+# checkpoints).
 #
 # Usage:
 #   SCALE=4b bash trainium/run_pipeline.sh          # Qwen3-4B-Base + Qwen3-8B teacher
-#   SCALE=8b bash trainium/run_pipeline.sh          # Qwen3-8B-Base + Qwen3-32B teacher
 #   SCALE=4b SMOKE=1 bash trainium/run_pipeline.sh  # tiny end-to-end test (5k SFT / 2k OPD)
+#   SCALE=8b bash trainium/run_pipeline.sh          # Qwen3-8B (see 8B note below)
+#
+# Hardware note (trn2.3xlarge = 1 Trainium2 chip):
+#   A Trainium2 chip has 8 physical NeuronCores, exposed as 4 LOGICAL cores
+#   under the default LNC=2 config (verify with `neuron-ls`). Software (this
+#   script, torchrun, vLLM) addresses the 4 logical cores, so NUM_CORES=4 and
+#   TP<=4. All sharding happens inside one 96 GiB HBM pool (no data
+#   parallelism), which is the binding constraint — see the 8B note.
 #
 # Key environment overrides:
 #   INFER_VENV / TRAIN_VENV - Neuron venv paths (see setup_env.sh)
-#   SFT_SAMPLES             - SFT prompt count      (default 300000)
-#   OPD_STEPS               - Lightning OPD steps   (default 150)
-#   NUM_CORES               - NeuronCores available (default 32)
+#   SFT_SAMPLES             - SFT prompt count            (default 300000)
+#   OPD_STEPS               - Lightning OPD steps         (default 150)
+#   NUM_CORES               - logical NeuronCores         (default 4 = trn2.3xlarge)
+#   TRAIN_TP / GEN_TP       - tensor-parallel size        (default 4)
+#   CUTOFF_LEN              - SFT packed seq length        (default 16384 = paper;
+#                             smoke uses 4096. Lower it if step 2 OOMs on 1 chip)
 
 set -euo pipefail
 
@@ -29,7 +41,15 @@ cd "${REPO_ROOT}"
 # ── Configuration ─────────────────────────────────────────────────────────
 SCALE="${SCALE:-4b}"
 SMOKE="${SMOKE:-0}"
-NUM_CORES="${NUM_CORES:-32}"
+# Remember whether the user passed SFT_GBS before the SCALE block assigns its
+# default, so the smoke override can distinguish "user set it" from "default".
+SFT_GBS_USER="${SFT_GBS-}"
+# trn2.3xlarge = 1 Trainium2 chip = 4 logical NeuronCores (LNC=2 default).
+# For trn1.32xlarge use NUM_CORES=32 TRAIN_TP=8 GEN_TP=8; trn2.48xlarge=64.
+NUM_CORES="${NUM_CORES:-4}"
+TRAIN_TP="${TRAIN_TP:-4}"          # tensor-parallel size for SFT/OPD (<= NUM_CORES)
+# CUTOFF_LEN is defaulted below to 16384 (paper); the smoke run keeps it (the
+# smoke run mirrors the real config, only the dataset and step count shrink).
 INFER_VENV="${INFER_VENV:-/opt/aws_neuronx_venv_pytorch_2_7_nxd_inference}"
 TRAIN_VENV="${TRAIN_VENV:-/opt/aws_neuronx_venv_pytorch_2_7}"
 
@@ -39,38 +59,73 @@ case "${SCALE}" in
         TEACHER="Qwen/Qwen3-8B"
         TEACHER_TAG="qwen3-8b"
         SFT_GBS="${SFT_GBS:-256}"       # LlamaFactory: 4 x 2 x 32 GPUs
-        GEN_TP="${GEN_TP:-8}"
+        GEN_TP="${GEN_TP:-${NUM_CORES}}"
         ;;
     8b)
         STUDENT_BASE="Qwen/Qwen3-8B-Base"
         TEACHER="Qwen/Qwen3-32B"
         TEACHER_TAG="qwen3-32b"
         SFT_GBS="${SFT_GBS:-128}"       # LlamaFactory: 2 x 2 x 32 GPUs
-        GEN_TP="${GEN_TP:-8}"
+        GEN_TP="${GEN_TP:-${NUM_CORES}}"
         ;;
     *)
         echo "SCALE must be 4b or 8b"; exit 1 ;;
 esac
 
-EXTRA_GEN_ARGS=()
+# ── Single-chip feasibility guard ─────────────────────────────────────────
+# Qwen3-8B full fine-tune needs ~128 GB (bf16 weights + grads + fp32 Adam +
+# master weights) which does not fit in one Trainium2 chip's 96 GiB HBM.
+# On a single chip TP only splits tensors within the same HBM pool (no data
+# parallelism / ZeRO sharding across chips), so raising TP does not help.
+# Refusing by default avoids a multi-hour run that OOMs at step 2. A LoRA 8B
+# path (which would fit but changes the training method) is not implemented
+# yet; ALLOW_8B_OOM=1 forces the full-FT run anyway (expect step 2 to OOM).
+if [[ "${SCALE}" == "8b" && "${NUM_CORES}" -le 4 && "${ALLOW_8B_OOM:-0}" != "1" ]]; then
+    echo "ERROR: SCALE=8b full fine-tune does not fit on ${NUM_CORES} logical cores"
+    echo "       (one Trainium2 chip, 96 GiB). Options:"
+    echo "         - 4B scale instead:  SCALE=4b bash trainium/run_pipeline.sh"
+    echo "         - full 8B FT on a bigger box: NUM_CORES=32 TRAIN_TP=8 (trn1.32xlarge)"
+    echo "       (LoRA-8B-on-one-chip is not wired up yet — ask if you want it.)"
+    exit 1
+fi
+
+EXTRA_GEN_ARGS=()   # rollout generation (step 3)
+SFT_GEN_ARGS=()     # SFT-data generation (step 1)
 if [[ "${SMOKE}" == "1" ]]; then
-    # Tiny end-to-end validation run: 5k SFT prompts, 2k OPD rollouts
-    SFT_SAMPLES=5000
-    SFT_STEPS=100
-    OPD_STEPS=20
-    EXTRA_GEN_ARGS=(--num-samples 2000)
-    echo ">>> SMOKE mode: 5k SFT prompts / 100 SFT steps, 2k rollouts, 20 OPD steps"
+    # Faithful mini-run: SAME config as the real run — generation length
+    # (16384), SFT packing length (CUTOFF_LEN=16384), OPD sequence length
+    # (5632), learning rates, schedules, warmup, betas are all left at their
+    # training values, so the smoke compiles the same Neuron graphs, hits the
+    # same memory footprint, and exercises the same code paths as SCALE=4b.
+    # Only the DATASET is smaller (64 SFT prompts / 64 rollouts) and the step
+    # count is short. The one unavoidable deviation is the global batch size:
+    # a 256-sequence batch cannot be formed from 64 samples, so GBS is scaled
+    # down — this changes only the gradient-accumulation count, not any
+    # compiled shape or hyperparameter. If step 2/5 OOMs here, it will OOM in
+    # the real run too (lower CUTOFF_LEN / MAX_SEQ_LEN for both).
+    SFT_SAMPLES=64
+    SFT_STEPS="${SFT_STEPS:-8}"
+    OPD_STEPS="${OPD_STEPS:-8}"
+    SFT_GBS="${SFT_GBS_USER:-8}"   # blocks/optimizer step (real run: 256)
+    OPD_GBS="${OPD_GBS:-8}"        # rollouts/optimizer step (real run: 256)
+    EXTRA_GEN_ARGS=(--num-samples 64)
+    export OPD_DEBUG=1             # verbose per-step diagnostics
+    echo ">>> SMOKE mode: faithful mini-run — 64 SFT prompts / 64 rollouts, real"
+    echo ">>>            config unchanged (cutoff/seq-len/gen-length/LR), GBS"
+    echo ">>>            ${SFT_GBS} (SFT) / ${OPD_GBS} (OPD), ${SFT_STEPS} SFT + ${OPD_STEPS} OPD steps, OPD_DEBUG on"
 fi
 SFT_SAMPLES="${SFT_SAMPLES:-300000}"
 OPD_STEPS="${OPD_STEPS:-150}"
+# Main run defaults to the paper's SFT packing length. On one trn2.3xlarge
+# chip this is the biggest OOM lever for step 2 — if it OOMs, override with
+# CUTOFF_LEN=8192 (or 4096); the data is unchanged, only packing efficiency.
+CUTOFF_LEN="${CUTOFF_LEN:-16384}"
 
 STUDENT_TAG="qwen3-${SCALE}"
 SFT_CKPT_DIR="checkpoints/${STUDENT_TAG}-base-sft-${TEACHER_TAG}"
 SFT_HF_DIR="${SFT_CKPT_DIR}-hf"
 OPD_CKPT_DIR="checkpoints/${STUDENT_TAG}-lightning-opd"
 OPD_HF_DIR="${OPD_CKPT_DIR}-hf"
-
-OPD_PROBE_PARQUET="data/probe/opd_probe_${TEACHER_TAG}.parquet"
 
 STATE_DIR="data/.pipeline_state/${SCALE}$( [[ ${SMOKE} == 1 ]] && echo -smoke || true )"
 mkdir -p "${STATE_DIR}" data/prompts
@@ -120,24 +175,12 @@ stage_prompts() {
         --local-dir data/prompts/dapo-math-17k
 }
 
-stage_opd_probe() {
-    # Frozen probe set: teacher responses + logprobs on OPD prompts, used to
-    # monitor student convergence during SFT (fwd_kl, drift) and decide when
-    # SFT is enough to move on to OPD. See trainium/opd_probe.py.
-    python "${SCRIPT_DIR}/build_opd_probe.py" \
-        --teacher-model "${TEACHER}" \
-        --opd-prompts data/prompts/dapo-math-17k/dapo-math-17k.jsonl \
-        --output "${OPD_PROBE_PARQUET}" \
-        --num-prompts "${PROBE_SIZE:-64}" \
-        --tensor-parallel-size "${GEN_TP}"
-}
-
 stage_sft_data() {
     TEACHER_MODEL="${TEACHER}" \
     SFT_PROMPTS="data/prompts/openthoughts3_${SFT_SAMPLES}.jsonl" \
     OUTPUT_DIR="data/sft_data" \
     NUM_CORES="${NUM_CORES}" TP_SIZE="${GEN_TP}" \
-    bash "${SCRIPT_DIR}/step1_generate_sft_data.sh"
+    bash "${SCRIPT_DIR}/step1_generate_sft_data.sh" "${SFT_GEN_ARGS[@]}"
 }
 
 stage_sft_merge() {
@@ -153,10 +196,9 @@ stage_sft_train() {
     MODEL_ID="${STUDENT_BASE}" \
     SFT_PARQUET="data/sft_data/openthoughts3_${SFT_SAMPLES}_${TEACHER_TAG}.parquet" \
     OUTPUT_DIR="${SFT_CKPT_DIR}" \
-    NUM_CORES="${NUM_CORES}" GBS="${SFT_GBS}" \
+    NUM_CORES="${NUM_CORES}" TP_SIZE="${TRAIN_TP}" \
+    GBS="${SFT_GBS}" CUTOFF_LEN="${CUTOFF_LEN}" \
     MAX_STEPS="${SFT_STEPS:-3000}" \
-    OPD_PROBE="${OPD_PROBE_PARQUET}" \
-    PROBE_EVERY="${PROBE_EVERY:-5}" PROBE_SIZE="${PROBE_SIZE:-64}" \
     bash "${SCRIPT_DIR}/step2_sft_train.sh"
 }
 
@@ -193,9 +235,8 @@ stage_opd_train() {
     SFT_CHECKPOINT="${SFT_HF_DIR}" \
     LIGHTNING_OPD_DATA="data/lightning_opd/dapo-math-17k-${STUDENT_TAG}-sft-rollouts-lightning-opd-precomputed.parquet" \
     OUTPUT_DIR="${OPD_CKPT_DIR}" \
-    NUM_CORES="${NUM_CORES}" MAX_STEPS="${OPD_STEPS}" \
-    OPD_PROBE="${OPD_PROBE_PARQUET}" \
-    PROBE_EVERY="${PROBE_EVERY:-5}" PROBE_SIZE="${PROBE_SIZE:-64}" \
+    NUM_CORES="${NUM_CORES}" TP_SIZE="${TRAIN_TP}" MAX_STEPS="${OPD_STEPS}" \
+    GBS="${OPD_GBS:-256}" MAX_SEQ_LEN="${OPD_MAX_SEQ_LEN:-5632}" \
     bash "${SCRIPT_DIR}/step5_lightning_opd_train.sh"
 }
 
@@ -207,7 +248,6 @@ stage_opd_consolidate() {
 echo "=== Lightning OPD on Trainium: SCALE=${SCALE} student=${STUDENT_BASE} teacher=${TEACHER} ==="
 
 run_stage prompts            "${INFER_VENV}" stage_prompts            # step 0
-run_stage opd_probe          "${INFER_VENV}" stage_opd_probe          # probe set for SFT monitoring
 run_stage sft_data           "${INFER_VENV}" stage_sft_data           # step 1
 run_stage sft_merge          "${INFER_VENV}" stage_sft_merge
 run_stage sft_train          "${TRAIN_VENV}" stage_sft_train          # step 2

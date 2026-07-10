@@ -46,6 +46,14 @@ from optimum.neuron.models.training import NeuronModelForCausalLM
 
 from logprob_utils import token_logprobs
 
+DEBUG = os.environ.get("OPD_DEBUG", "0") == "1"
+IS_MAIN = int(os.environ.get("RANK", "0")) == 0
+
+
+def _dbg(*args):
+    if DEBUG and IS_MAIN:
+        print("[OPD][DEBUG]", *args, flush=True)
+
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -59,19 +67,13 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=150)
     p.add_argument("--global-batch-size", type=int, default=256)
     p.add_argument("--per-device-batch-size", type=int, default=1)
-    p.add_argument("--tensor-parallel-size", type=int, default=8)
+    p.add_argument("--tensor-parallel-size", type=int, default=4,
+                   help="4 = one trn2.3xlarge chip (4 logical cores); 8 for trn1.32xlarge.")
     p.add_argument("--learning-rate", type=float, default=2e-6)
     p.add_argument("--logging-steps", type=int, default=5)
     p.add_argument("--save-steps", type=int, default=10)
     p.add_argument("--save-total-limit", type=int, default=15)
     p.add_argument("--seed", type=int, default=42)
-    # Optional OPD probe (same probe set as step 2) to watch the OPD stage
-    # close the teacher gap that SFT plateaued at.
-    p.add_argument("--opd-probe-parquet", default=None)
-    p.add_argument("--probe-every", type=int, default=5)
-    p.add_argument("--probe-size", type=int, default=64)
-    p.add_argument("--probe-max-seq-len", type=int, default=4608)
-    p.add_argument("--probe-micro-batch", type=int, default=1)
     return p.parse_args()
 
 
@@ -93,6 +95,7 @@ class LightningOPDDataset(Dataset):
 
         self.samples = []
         dropped = 0
+        max_total = 0
         for i in order:
             row = df.iloc[int(i)]
             meta = row["metadata"]
@@ -101,13 +104,52 @@ class LightningOPDDataset(Dataset):
             loss_mask = [int(x) for x in meta["loss_mask"]]
             teacher_lp = [float(x) for x in meta["teacher_log_probs"]]
             total = len(prompt_ids) + len(response_ids)
+            max_total = max(max_total, total)
+            # slime does NOT drop rollouts by total length; it keeps the full
+            # prompt+response. We must pad to one static length for XLA, so rows
+            # that exceed max_seq_len are dropped rather than truncated —
+            # truncating the prompt would desync the student's context from the
+            # context the teacher scored (teacher_log_probs), corrupting the
+            # advantage. For DAPO (short prompts, response<=4096) nothing drops.
             if total > max_seq_len:
                 dropped += 1
                 continue
             self.samples.append((prompt_ids, response_ids, loss_mask, teacher_lp))
         if dropped:
-            print(f"[OPD data] Dropped {dropped}/{len(df)} rows longer than {max_seq_len}")
-        print(f"[OPD data] {len(self.samples)} training samples")
+            frac = dropped / max(len(df), 1)
+            msg = (f"[OPD data] Dropped {dropped}/{len(df)} rows ({frac:.1%}) with "
+                   f"prompt+response > --max-seq-len {max_seq_len} (longest seen: {max_total}). "
+                   f"slime keeps these; re-run with --max-seq-len >= {max_total} "
+                   f"(needs more device memory) to train on all rows.")
+            print(msg)
+            assert frac <= 0.02, (
+                msg + "  Refusing: dropping >2% of the data is a silent distribution "
+                "shift, not a faithful port. Raise --max-seq-len or check prompt lengths."
+            )
+        print(f"[OPD data] {len(self.samples)} training samples (longest seq {max_total})")
+
+        if DEBUG and IS_MAIN and self.samples:
+            p_ids, r_ids, l_mask, t_lp = self.samples[0]
+            # These three must be the same length; teacher_lp[j] is the teacher
+            # logprob of response token j — a mismatch here is the classic OPD
+            # off-by-one and corrupts every advantage.
+            _dbg(f"parquet rows={len(df)}; sample: prompt={len(p_ids)} tok, "
+                 f"response={len(r_ids)} tok")
+            _dbg(f"len(response_tokens)={len(r_ids)}, len(loss_mask)={len(l_mask)}, "
+                 f"len(teacher_log_probs)={len(t_lp)} "
+                 f"({'ALIGNED' if len(r_ids) == len(l_mask) == len(t_lp) else 'MISMATCH!!'})")
+            _dbg(f"loss_mask sum={sum(l_mask)} (# supervised response tokens); "
+                 f"values seen={sorted(set(l_mask))}")
+            _dbg(f"prompt[:80]={tokenizer.decode(p_ids)[:80]!r}")
+            _dbg(f"response first token id={r_ids[0]} "
+                 f"({tokenizer.decode([r_ids[0]])!r}) teacher_lp={t_lp[0]:.4f}")
+            import statistics
+            _dbg(f"teacher_lp stats: mean={statistics.fmean(t_lp):.4f}, "
+                 f"min={min(t_lp):.4f}, max={max(t_lp):.4f} (should be <= 0)")
+            resp_lens = [len(s[1]) for s in self.samples]
+            _dbg(f"response length min/mean/max = {min(resp_lens)}/"
+                 f"{sum(resp_lens) / len(resp_lens):.0f}/{max(resp_lens)}; "
+                 f"padded to max_seq_len={max_seq_len}")
 
         self.max_seq_len = max_seq_len
         self.pad_id = pad_id
@@ -137,6 +179,7 @@ class LightningOPDTrainer(NeuronTrainer):
     def __init__(self, *args, vocab_size=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._vocab_size = vocab_size
+        self._logged_debug = False
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         input_ids = inputs["input_ids"]
@@ -153,12 +196,53 @@ class LightningOPDTrainer(NeuronTrainer):
         t_lp = teacher_lp[:, 1:]
 
         # advantage = logP_teacher - logP_student  (detached), from
-        # slime loss.py `advantage_estimator == "on_policy_distillation"`
+        # slime loss.py `advantage_estimator == "on_policy_distillation"`.
+        # With rollout_batch_size == global_batch_size == 256 and one update
+        # per batch, slime's PPO ratio is exactly 1, so the gradient reduces
+        # to -advantage * d(logP_student) — reproduced here directly.
         advantage = (t_lp - student_lp).detach()
         pg_loss = -(advantage * student_lp)
 
-        denom = mask.sum().clamp(min=1.0)
-        loss = (pg_loss * mask).sum() / denom
+        # Reduction must match slime's `sum_of_sample_mean` with
+        # calculate_per_token_loss=False (the OPD config's default): the loss
+        # is the MEAN over samples of each sample's per-response-token mean —
+        # every sequence weighted equally regardless of length, NOT a global
+        # token mean. Compute the per-sample token-mean explicitly so this
+        # holds for any per_device_batch_size (HF then averages across
+        # gradient-accumulation microbatches, giving the global per-sample
+        # mean over the 256-sequence batch). The OPD dataset intentionally
+        # exposes no "labels" key, so HF keeps num_items_in_batch=None and
+        # uses legacy /grad_accum averaging — required for this to match.
+        per_sample = (pg_loss * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1.0)
+        loss = per_sample.mean()
+
+        if DEBUG and IS_MAIN and not self._logged_debug:
+            # One-time proof that student/teacher logprobs are aligned to the
+            # same target token and the loss reduction is well-formed. Forces a
+            # device sync (fine for a smoke run); guarded so it never breaks
+            # training if some tensor op is unhappy on device.
+            self._logged_debug = True
+            try:
+                m0 = mask[0]
+                nz = torch.nonzero(m0, as_tuple=False).flatten()
+                _dbg(f"shapes: logits={tuple(logits.shape)}, "
+                     f"student_lp={tuple(student_lp.shape)}, "
+                     f"teacher_lp={tuple(t_lp.shape)}, mask={tuple(mask.shape)}")
+                _dbg(f"response tokens in sample 0 (mask sum)={int(m0.sum().item())}")
+                if nz.numel() > 0:
+                    j = int(nz[0].item())          # first response position
+                    tgt = int(input_ids[0, 1:][j].item())
+                    s = float(student_lp[0, j].item())
+                    t = float(t_lp[0, j].item())
+                    _dbg(f"pos {j}: target_token={tgt}, student_lp={s:.4f}, "
+                         f"teacher_lp={t:.4f}, advantage(t-s)={t - s:.4f}")
+                adv_m = (advantage * mask)
+                denom = mask.sum().clamp(min=1.0)
+                _dbg(f"advantage over response tokens: mean="
+                     f"{float((adv_m.sum() / denom).item()):.4f}; loss={float(loss.item()):.4f}")
+            except Exception as e:  # never let debug crash training
+                _dbg(f"(debug dump skipped: {e})")
+
         return (loss, outputs) if return_outputs else loss
 
 
@@ -173,8 +257,19 @@ def main():
     )
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+    assert world_size % args.tensor_parallel_size == 0, (
+        f"WORLD_SIZE ({world_size}) must be divisible by --tensor-parallel-size "
+        f"({args.tensor_parallel_size}); otherwise the data-parallel layout is wrong."
+    )
     dp_size = world_size // args.tensor_parallel_size
-    grad_accum = max(1, args.global_batch_size // (dp_size * args.per_device_batch_size))
+    denom = dp_size * args.per_device_batch_size
+    assert args.global_batch_size % denom == 0, (
+        f"--global-batch-size ({args.global_batch_size}) must be divisible by "
+        f"dp_size * per_device_batch_size ({dp_size} * {args.per_device_batch_size} = {denom}); "
+        f"otherwise gradient accumulation floors and the effective global batch "
+        f"silently differs from {args.global_batch_size} (changing the OPD optimization)."
+    )
+    grad_accum = args.global_batch_size // denom
 
     training_args = NeuronTrainingArguments(
         output_dir=args.output_dir,
@@ -209,28 +304,11 @@ def main():
     )
     vocab_size = model.config.vocab_size
 
-    callbacks = []
-    if args.opd_probe_parquet:
-        from opd_probe import attach_probe
-        attach_probe(
-            callbacks,
-            probe_parquet=args.opd_probe_parquet,
-            tokenizer=tokenizer,
-            vocab_size=vocab_size,
-            output_dir=args.output_dir,
-            every=args.probe_every,
-            probe_size=args.probe_size,
-            max_seq_len=args.probe_max_seq_len,
-            micro_batch=args.probe_micro_batch,
-            tag="opd_probe",
-        )
-
     trainer = LightningOPDTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
         vocab_size=vocab_size,
-        callbacks=callbacks,
     )
 
     ckpts = sorted(Path(args.output_dir).glob("checkpoint-*")) if Path(args.output_dir).exists() else []

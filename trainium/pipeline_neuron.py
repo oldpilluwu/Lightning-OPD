@@ -28,6 +28,21 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from vllm import LLM, SamplingParams
 
+DEBUG = os.environ.get("OPD_DEBUG", "0") == "1"
+
+
+def _dbg(tag, *args):
+    if DEBUG:
+        print(f"{tag} [DEBUG]", *args, flush=True)
+
+
+def _describe_prompt(prompt):
+    """One-line shape of a prompt: chat-message list vs raw string."""
+    if isinstance(prompt, list):
+        roles = [m.get("role", "?") for m in prompt if isinstance(m, dict)]
+        return f"list[{len(prompt)}] roles={roles}"
+    return f"{type(prompt).__name__} len={len(prompt) if hasattr(prompt, '__len__') else '?'}"
+
 
 def load_dataset(path: str) -> list[dict]:
     if path.endswith(".parquet"):
@@ -64,6 +79,12 @@ def run_curation(args: argparse.Namespace) -> None:
     if args.world_size > 1:
         dataset = dataset[args.rank :: args.world_size]
     print(f"{tag} Assigned {len(dataset)} samples")
+
+    if DEBUG and dataset and args.rank == 0:
+        first = dataset[0]
+        _dbg(tag, f"input record keys: {sorted(first.keys())}")
+        _dbg(tag, f"prompt structure: {_describe_prompt(first.get('prompt'))}")
+        _dbg(tag, f"prompt[0] repr: {str(first.get('prompt'))[:400]}")
 
     if args.world_size > 1:
         output_dir = Path(args.output_dir) / f"rank{args.rank:05d}"
@@ -114,6 +135,17 @@ def run_curation(args: argparse.Namespace) -> None:
               f"({batch_end - batch_start} samples) ...")
 
         outputs = llm.chat(prompts, sampling_params)
+
+        if DEBUG and batch_idx == 0 and args.rank == 0 and outputs:
+            comp = outputs[0].outputs[0]
+            tok_counts = [len(o.outputs[0].token_ids) for o in outputs]
+            _dbg(tag, f"batch 0: {len(outputs)} prompts, generated token counts "
+                      f"min/mean/max = {min(tok_counts)}/"
+                      f"{sum(tok_counts) / len(tok_counts):.0f}/{max(tok_counts)}")
+            _dbg(tag, f"sample completion tokens={len(comp.token_ids)}, "
+                      f"finish_reason={comp.finish_reason}, "
+                      f"has_</think>={'</think>' in comp.text}")
+            _dbg(tag, f"sample completion text[:500]: {comp.text[:500]!r}")
 
         rows = []
         for item, output in zip(batch, outputs):

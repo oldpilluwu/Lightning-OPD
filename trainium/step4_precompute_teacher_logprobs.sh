@@ -11,8 +11,16 @@
 #   ROLLOUT_PARQUET - merged student rollout parquet from step 3
 #   OUTPUT_DIR      - output directory (e.g. data/lightning_opd)
 # Optional:
-#   TP_SIZE         - NeuronCores for the teacher engine (default: 8)
-#   MAX_MODEL_LEN   - teacher context (default: 8192, as in serve_teacher_*.sh)
+#   TP_SIZE         - NeuronCores for the teacher engine (default: 4 = one
+#                     trn2.3xlarge chip; use 8 on trn1.32xlarge)
+#   MAX_MODEL_LEN   - teacher context (default: 8192, as in serve_teacher_*.sh).
+#                     Must exceed the longest prompt+response by >=1 token
+#                     (vLLM needs 1 output token to score). The scorer checks
+#                     this up front and tells you the value to use if too small.
+#
+# Note (8B scale): the Qwen3-32B teacher is ~64 GiB in bf16; on one 96 GiB
+# chip it fits but leaves little room for KV cache. If Phase 2 OOMs, lower
+# --max-num-seqs (in step4_teacher_logprobs_neuron.py) and/or MAX_MODEL_LEN.
 
 set -euo pipefail
 
@@ -21,7 +29,7 @@ set -euo pipefail
 : "${ROLLOUT_PARQUET:?Set ROLLOUT_PARQUET to the student rollout parquet}"
 : "${OUTPUT_DIR:?Set OUTPUT_DIR for the output parquet}"
 
-TP_SIZE="${TP_SIZE:-8}"
+TP_SIZE="${TP_SIZE:-4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
