@@ -17,6 +17,12 @@
 #                     Must exceed the longest prompt+response by >=1 token
 #                     (vLLM needs 1 output token to score). The scorer checks
 #                     this up front and tells you the value to use if too small.
+#   OVERRIDE_NEURON_CONFIG - JSON forwarded to vLLM's override_neuron_config.
+#                     On the V1 Neuron plugin, on-device sampling is the default
+#                     and does NOT return prompt_logprobs; disable it so vLLM
+#                     samples on CPU, e.g.
+#                       OVERRIDE_NEURON_CONFIG='{"on_device_sampling_config": null}'
+#                     Confirm the exact key with the SETUP.md §6(b) smoke test.
 #
 # Note (8B scale): the Qwen3-32B teacher is ~64 GiB in bf16; on one 96 GiB
 # chip it fits but leaves little room for KV cache. If Phase 2 OOMs, lower

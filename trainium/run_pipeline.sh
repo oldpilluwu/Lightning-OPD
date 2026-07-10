@@ -50,8 +50,32 @@ NUM_CORES="${NUM_CORES:-4}"
 TRAIN_TP="${TRAIN_TP:-4}"          # tensor-parallel size for SFT/OPD (<= NUM_CORES)
 # CUTOFF_LEN is defaulted below to 16384 (paper); the smoke run keeps it (the
 # smoke run mirrors the real config, only the dataset and step count shrink).
-INFER_VENV="${INFER_VENV:-/opt/aws_neuronx_venv_pytorch_2_7_nxd_inference}"
-TRAIN_VENV="${TRAIN_VENV:-/opt/aws_neuronx_venv_pytorch_2_7}"
+# Auto-detect the Neuron DLAMI venvs by role — names carry the torch version
+# (e.g. _2_9) and the vLLM one is separate (…_inference_vllm_0_16), so match by
+# role, not exact name. Override by exporting INFER_VENV / TRAIN_VENV.
+# Same logic + rationale as setup_env.sh.
+_pick_venv() {  # $1 = grep -E pattern on basename; prints first /opt match
+    local d
+    for d in /opt/aws_neuronx_venv_*; do
+        [[ -e "${d}/bin/activate" ]] || continue
+        basename "${d}" | grep -Eq "$1" && { echo "${d}"; return 0; }
+    done
+    return 1
+}
+if [[ -z "${INFER_VENV:-}" ]]; then
+    INFER_VENV="$(_pick_venv 'vllm')" || INFER_VENV="$(_pick_venv 'inference')" \
+        || { echo "ERROR: no inference venv under /opt; set INFER_VENV manually." >&2; exit 1; }
+fi
+if [[ -z "${TRAIN_VENV:-}" ]]; then
+    for d in /opt/aws_neuronx_venv_pytorch_*; do
+        case "$(basename "${d}")" in *inference*|*vllm*) continue ;; esac
+        [[ -e "${d}/bin/activate" ]] && { TRAIN_VENV="${d}"; break; }
+    done
+    [[ -n "${TRAIN_VENV:-}" ]] \
+        || { echo "ERROR: no training venv under /opt; set TRAIN_VENV manually." >&2; exit 1; }
+fi
+echo "[run_pipeline] INFER_VENV=${INFER_VENV}"
+echo "[run_pipeline] TRAIN_VENV=${TRAIN_VENV}"
 
 case "${SCALE}" in
     4b)

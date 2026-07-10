@@ -21,9 +21,21 @@ skips completed chunks.
 
 NOTE: requires a Neuron vLLM build that supports `prompt_logprobs`. Verify
 with the smoke test in SETUP.md before launching the full run.
+
+V1 CAVEAT (vLLM-Neuron plugin >= 0.5, SDK >= 2.29): the plugin defaults to
+*on-device sampling*, which only surfaces temperature/top_k/top_p and does NOT
+return logprobs — so `prompt_logprobs` comes back empty/unsupported. To score,
+on-device sampling must be disabled so vLLM samples on CPU from the full logits.
+Do that by passing an override via --override-neuron-config (JSON) or the
+OVERRIDE_NEURON_CONFIG env var, e.g.
+    OVERRIDE_NEURON_CONFIG='{"on_device_sampling_config": null}'
+Confirm the exact key against your plugin version with the SETUP.md §6(b) smoke
+test before the full run; if CPU sampling still won't return prompt_logprobs,
+use the forward-pass fallback (SETUP.md §10).
 """
 
 import argparse
+import json
 import math
 import os
 from pathlib import Path
@@ -51,6 +63,12 @@ def parse_args():
                    help="Matches the original teacher server context length.")
     p.add_argument("--max-num-seqs", type=int, default=8)
     p.add_argument("--chunk-size", type=int, default=512)
+    p.add_argument("--override-neuron-config", type=str,
+                   default=os.environ.get("OVERRIDE_NEURON_CONFIG", ""),
+                   help="JSON dict forwarded to LLM(override_neuron_config=...). "
+                        "Needed on the V1 Neuron plugin to disable on-device "
+                        "sampling so prompt_logprobs are returned (CPU sampling). "
+                        "See the module docstring.")
     return p.parse_args()
 
 
@@ -95,15 +113,22 @@ def main():
         print(f"[Step 4] Longest sequence {max_full} tokens fits max-model-len "
               f"{args.max_model_len}.")
 
-        print(f"[Step 4] Loading teacher on Neuron: {args.teacher_model} "
-              f"(tp={args.tensor_parallel_size})")
-        llm = LLM(
+        llm_kwargs = dict(
             model=args.teacher_model,
             tensor_parallel_size=args.tensor_parallel_size,
             max_model_len=args.max_model_len,
             max_num_seqs=args.max_num_seqs,
             trust_remote_code=True,
         )
+        if args.override_neuron_config.strip():
+            try:
+                llm_kwargs["override_neuron_config"] = json.loads(args.override_neuron_config)
+            except json.JSONDecodeError as e:
+                raise SystemExit(f"[Step 4] --override-neuron-config is not valid JSON: {e}")
+            print(f"[Step 4] override_neuron_config = {llm_kwargs['override_neuron_config']}")
+        print(f"[Step 4] Loading teacher on Neuron: {args.teacher_model} "
+              f"(tp={args.tensor_parallel_size})")
+        llm = LLM(**llm_kwargs)
         # temperature 0 / no new tokens: pure scoring, same as the sglang call
         sp = SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=0)
 
@@ -127,6 +152,24 @@ def main():
                 response_lens.append(len(response_ids))
 
             outputs = llm.generate(prompts, sp)
+
+            # Fail loudly if the build ignored prompt_logprobs. On the V1 Neuron
+            # plugin this is the on-device-sampling default: generation succeeds
+            # but out.prompt_logprobs is None. Detect it on the first output
+            # instead of crashing on a NoneType subscript deeper in the loop.
+            if outputs and (outputs[0].prompt_logprobs is None
+                            or all(p is None for p in outputs[0].prompt_logprobs)):
+                raise SystemExit(
+                    "[Step 4] The teacher returned no prompt_logprobs — this "
+                    "Neuron vLLM build isn't surfacing them (on-device sampling "
+                    "is likely enabled). Disable it so vLLM samples on CPU, e.g.\n"
+                    "    OVERRIDE_NEURON_CONFIG='{\"on_device_sampling_config\": null}' \\\n"
+                    "        bash trainium/step4_precompute_teacher_logprobs.sh ...\n"
+                    "Verify the exact key with the SETUP.md §6(b) smoke test. If "
+                    "CPU sampling still won't return them, use the forward-pass "
+                    "fallback (SETUP.md §10). No chunks were written, so nothing "
+                    "to clean up before retrying."
+                )
 
             chunk_lps = []
             for out, rlen in zip(outputs, response_lens):

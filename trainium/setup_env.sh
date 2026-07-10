@@ -99,17 +99,27 @@ pip install --upgrade pip
 # fine on numpy 2.x despite the conservative pin, so we deliberately install
 # numpy 2.x LAST and ignore pip's "dependency conflict" warning for it.
 # Upper bound <2.5 keeps the DLAMI's numba (needs numpy<2.5) happy too.
-pip install "optimum-neuron>=0.3.0" datasets pandas pyarrow tqdm
+#
+# CRITICAL: the trainer classes (NeuronTrainer / NeuronSFTTrainer) live behind
+# optimum-neuron's PEFT/LoRA shim, which is built against EXACT peft/trl
+# versions. Installing plain "optimum-neuron" (without the [training] extra)
+# leaves whatever peft the DLAMI shipped, and a newer peft breaks the shim with
+# "type object 'LoraLinear' has no attribute 'merge'" — the trainer imports then
+# fail even though the model classes load fine. Pin peft/trl to what 0.4.3
+# declares (peft==0.17.0, trl==0.24.0). Update these if you bump optimum-neuron.
+pip install "optimum-neuron>=0.3.0" "peft==0.17.0" "trl==0.24.0" datasets pandas pyarrow tqdm
 # Force the DLAMI-compatible numpy back on top, regardless of what optimum-neuron
 # pulled. The resulting pip metadata warning about optimum-neuron is expected.
 pip install --force-reinstall "numpy>=2.0.0,<2.5"
-# Smoke-test the exact symbols the training scripts (step2/step5) import.
+# Smoke-test the exact symbols the training scripts (step2/step5) import,
+# including a trainer class so the peft shim is actually exercised.
 python - <<'PY'
 import importlib.metadata as m
-from optimum.neuron import NeuronTrainer, NeuronTrainingArguments
-from optimum.neuron.models.training import NeuronModelForCausalLM
+from optimum.neuron import NeuronTrainer, NeuronSFTTrainer, NeuronTrainingArguments
+from optimum.neuron.models.training import NeuronModelForCausalLM, Qwen3ForCausalLM
 import torch, torch_neuronx, numpy
-print("optimum-neuron OK:", m.version("optimum-neuron"), "| numpy:", numpy.__version__)
+print("optimum-neuron OK:", m.version("optimum-neuron"),
+      "| peft:", m.version("peft"), "| numpy:", numpy.__version__)
 PY
 deactivate
 
