@@ -15,8 +15,52 @@
 
 set -euo pipefail
 
-INFER_VENV="${INFER_VENV:-/opt/aws_neuronx_venv_pytorch_2_7_nxd_inference}"
-TRAIN_VENV="${TRAIN_VENV:-/opt/aws_neuronx_venv_pytorch_2_7}"
+# Auto-detect the Neuron venvs that ship with the DLAMI. Names carry the
+# PyTorch version (e.g. _2_7, _2_9), so we match by role rather than exact name.
+# Override by exporting INFER_VENV / TRAIN_VENV before running.
+#
+#   INFER_VENV -> a venv with vLLM (preferred) or the *_nxd_inference venv
+#   TRAIN_VENV -> the plain torch-neuronx training venv (no _inference/_vllm)
+pick_venv() {
+    # $1 = grep -E pattern (matched against basename), prints first match under /opt
+    local d
+    for d in /opt/aws_neuronx_venv_*; do
+        [[ -x "${d}/bin/activate" || -f "${d}/bin/activate" ]] || continue
+        if basename "${d}" | grep -Eq "$1"; then
+            echo "${d}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [[ -z "${INFER_VENV:-}" ]]; then
+    INFER_VENV="$(pick_venv 'vllm')" \
+        || INFER_VENV="$(pick_venv 'nxd_inference|inference')" \
+        || { echo "ERROR: could not find an inference venv under /opt. Set INFER_VENV manually." >&2; \
+             echo "Available:" >&2; ls -d /opt/aws_neuronx_venv_* 2>/dev/null >&2; exit 1; }
+fi
+
+if [[ -z "${TRAIN_VENV:-}" ]]; then
+    # A pytorch venv that is NOT an inference/vllm venv.
+    TRAIN_VENV="$(pick_venv 'pytorch_[0-9]' | grep -Ev 'inference|vllm' | head -n1)"
+    if [[ -z "${TRAIN_VENV}" ]]; then
+        for d in /opt/aws_neuronx_venv_pytorch_*; do
+            case "$(basename "${d}")" in
+                *inference*|*vllm*) continue ;;
+                *) TRAIN_VENV="${d}"; break ;;
+            esac
+        done
+    fi
+    [[ -n "${TRAIN_VENV}" ]] \
+        || { echo "ERROR: could not find a training venv under /opt. Set TRAIN_VENV manually." >&2; \
+             echo "Available:" >&2; ls -d /opt/aws_neuronx_venv_* 2>/dev/null >&2; exit 1; }
+fi
+
+echo "Detected venvs:"
+echo "  INFER_VENV=${INFER_VENV}"
+echo "  TRAIN_VENV=${TRAIN_VENV}"
+echo
 
 echo "=== [1/2] Inference env: ${INFER_VENV} ==="
 # shellcheck disable=SC1091
