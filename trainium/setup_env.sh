@@ -66,7 +66,9 @@ echo "=== [1/2] Inference env: ${INFER_VENV} ==="
 # shellcheck disable=SC1091
 source "${INFER_VENV}/bin/activate"
 pip install --upgrade pip
-pip install pandas pyarrow tqdm datasets aiohttp "huggingface_hub[cli]"
+# Pin numpy>=2 in the same command so datasets can't downgrade it (the DLAMI's
+# neuronx-cc / torch-neuronx require numpy>=2.0).
+pip install "numpy>=2.0.0,<2.8" pandas pyarrow tqdm datasets aiohttp "huggingface_hub[cli]"
 
 # vLLM with the AWS Neuron backend. Newer NxD-Inference DLAMIs ship it
 # pre-installed; if not, install the AWS Neuron fork of vLLM.
@@ -90,10 +92,24 @@ echo "=== [2/2] Training env: ${TRAIN_VENV} ==="
 source "${TRAIN_VENV}/bin/activate"
 pip install --upgrade pip
 # optimum-neuron >= 0.3 is required for Qwen3 training support on Neuron.
+# NOTE: optimum-neuron's metadata hard-pins numpy<=1.26.4, but the DLAMI's
+# neuronx-cc / torch_neuronx / scipy REQUIRE numpy>=2.0 (torch_neuronx crashes
+# on import under numpy 1.x). These pins are mutually exclusive; the DLAMI wins
+# because it runs the model on the device. optimum-neuron imports and trains
+# fine on numpy 2.x despite the conservative pin, so we deliberately install
+# numpy 2.x LAST and ignore pip's "dependency conflict" warning for it.
+# Upper bound <2.5 keeps the DLAMI's numba (needs numpy<2.5) happy too.
 pip install "optimum-neuron>=0.3.0" datasets pandas pyarrow tqdm
+# Force the DLAMI-compatible numpy back on top, regardless of what optimum-neuron
+# pulled. The resulting pip metadata warning about optimum-neuron is expected.
+pip install --force-reinstall "numpy>=2.0.0,<2.5"
+# Smoke-test the exact symbols the training scripts (step2/step5) import.
 python - <<'PY'
-import optimum.neuron, torch, torch_neuronx
-print("optimum-neuron OK:", optimum.neuron.__version__)
+import importlib.metadata as m
+from optimum.neuron import NeuronTrainer, NeuronTrainingArguments
+from optimum.neuron.models.training import NeuronModelForCausalLM
+import torch, torch_neuronx, numpy
+print("optimum-neuron OK:", m.version("optimum-neuron"), "| numpy:", numpy.__version__)
 PY
 deactivate
 
