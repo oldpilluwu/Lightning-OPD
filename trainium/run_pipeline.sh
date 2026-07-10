@@ -48,6 +48,11 @@ SFT_GBS_USER="${SFT_GBS-}"
 # For trn1.32xlarge use NUM_CORES=32 TRAIN_TP=8 GEN_TP=8; trn2.48xlarge=64.
 NUM_CORES="${NUM_CORES:-4}"
 TRAIN_TP="${TRAIN_TP:-4}"          # tensor-parallel size for SFT/OPD (<= NUM_CORES)
+# Step 4 teacher scoring backend. "forward" (default) runs a forward pass through
+# NeuronModelForCausalLM in the TRAIN venv — the vLLM prompt_logprobs path is
+# broken on vllm-neuron 0.16 (see step4_teacher_forward_neuron.py). "vllm" keeps
+# the old offline-prompt-logprob path (INFER venv) for SDKs where it works.
+TEACHER_BACKEND="${TEACHER_BACKEND:-forward}"
 # CUTOFF_LEN is defaulted below to 16384 (paper); the smoke run keeps it (the
 # smoke run mirrors the real config, only the dataset and step count shrink).
 # Auto-detect the Neuron DLAMI venvs by role — names carry the torch version
@@ -251,6 +256,8 @@ stage_teacher_logprobs() {
     SFT_CHECKPOINT="${SFT_HF_DIR}" \
     ROLLOUT_PARQUET="data/rollouts/dapo-math-17k-${STUDENT_TAG}-sft-rollouts.parquet" \
     OUTPUT_DIR="data/lightning_opd" \
+    BACKEND="${TEACHER_BACKEND}" \
+    NUM_CORES="${NUM_CORES}" \
     TP_SIZE="${GEN_TP}" \
     bash "${SCRIPT_DIR}/step4_precompute_teacher_logprobs.sh"
 }
@@ -278,7 +285,10 @@ run_stage sft_train          "${TRAIN_VENV}" stage_sft_train          # step 2
 run_stage sft_consolidate    "${TRAIN_VENV}" stage_sft_consolidate
 run_stage rollouts           "${INFER_VENV}" stage_rollouts           # step 3
 run_stage rollout_merge      "${INFER_VENV}" stage_rollout_merge
-run_stage teacher_logprobs   "${INFER_VENV}" stage_teacher_logprobs   # step 4
+# Step 4 venv depends on the backend: "forward" runs in the TRAIN venv
+# (optimum-neuron + torchrun), "vllm" in the INFER venv.
+if [[ "${TEACHER_BACKEND}" == "vllm" ]]; then TEACHER_VENV="${INFER_VENV}"; else TEACHER_VENV="${TRAIN_VENV}"; fi
+run_stage teacher_logprobs   "${TEACHER_VENV}" stage_teacher_logprobs  # step 4
 run_stage opd_train          "${TRAIN_VENV}" stage_opd_train          # step 5
 run_stage opd_consolidate    "${TRAIN_VENV}" stage_opd_consolidate    # step 6
 

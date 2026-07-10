@@ -11,7 +11,12 @@
 #   ROLLOUT_PARQUET - merged student rollout parquet from step 3
 #   OUTPUT_DIR      - output directory (e.g. data/lightning_opd)
 # Optional:
-#   TP_SIZE         - NeuronCores for the teacher engine (default: 4 = one
+#   BACKEND         - "forward" (default) scores with a forward pass through
+#                     NeuronModelForCausalLM (TRAIN venv, torchrun). "vllm" uses
+#                     the offline prompt_logprobs path (INFER venv) — BROKEN on
+#                     vllm-neuron 0.16, kept only for SDKs where it works.
+#   NUM_CORES       - torchrun procs for BACKEND=forward (default: TP_SIZE).
+#   TP_SIZE         - tensor-parallel size for the teacher (default: 4 = one
 #                     trn2.3xlarge chip; use 8 on trn1.32xlarge)
 #   MAX_MODEL_LEN   - teacher context (default: 8192, as in serve_teacher_*.sh).
 #                     Must exceed the longest prompt+response by >=1 token
@@ -35,7 +40,9 @@ set -euo pipefail
 : "${ROLLOUT_PARQUET:?Set ROLLOUT_PARQUET to the student rollout parquet}"
 : "${OUTPUT_DIR:?Set OUTPUT_DIR for the output parquet}"
 
+BACKEND="${BACKEND:-forward}"
 TP_SIZE="${TP_SIZE:-4}"
+NUM_CORES="${NUM_CORES:-${TP_SIZE}}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -52,11 +59,35 @@ if [[ ! -f "${INTERMEDIATE}" ]]; then
         --output-dir "${OUTPUT_DIR}"
 fi
 
-# Phase 2: teacher logprobs on Neuron (replaces the sglang server)
-python3 "${SCRIPT_DIR}/step4_teacher_logprobs_neuron.py" \
-    --teacher-model "${TEACHER_MODEL}" \
-    --tokenizer-path "${SFT_CHECKPOINT}" \
-    --intermediate-parquet "${INTERMEDIATE}" \
-    --output-parquet "${FINAL}" \
-    --tensor-parallel-size "${TP_SIZE}" \
-    --max-model-len "${MAX_MODEL_LEN}"
+# Phase 2: teacher logprobs on Neuron (replaces the sglang server).
+if [[ "${BACKEND}" == "forward" ]]; then
+    # Forward-pass scorer: NeuronModelForCausalLM under torchrun (TRAIN venv).
+    # This is the working path on vllm-neuron 0.16.
+    export NEURON_CC_FLAGS="--model-type transformer --distribution-strategy=llm-training ${NEURON_CC_FLAGS:-}"
+    export NEURON_FUSE_SOFTMAX=1
+    export MALLOC_ARENA_MAX=64
+    torchrun --nproc_per_node="${NUM_CORES}" \
+        "${SCRIPT_DIR}/step4_teacher_forward_neuron.py" \
+        --teacher-model "${TEACHER_MODEL}" \
+        --tokenizer-path "${SFT_CHECKPOINT}" \
+        --intermediate-parquet "${INTERMEDIATE}" \
+        --output-parquet "${FINAL}" \
+        --tensor-parallel-size "${TP_SIZE}" \
+        --max-seq-len "${MAX_MODEL_LEN}" \
+        "$@"
+elif [[ "${BACKEND}" == "vllm" ]]; then
+    # Legacy offline prompt_logprobs path — BROKEN on vllm-neuron 0.16
+    # (on-device sampling returns no logprobs; CPU-sampling path crashes).
+    # Kept for SDKs/plugin versions where prompt_logprobs works.
+    python3 "${SCRIPT_DIR}/step4_teacher_logprobs_neuron.py" \
+        --teacher-model "${TEACHER_MODEL}" \
+        --tokenizer-path "${SFT_CHECKPOINT}" \
+        --intermediate-parquet "${INTERMEDIATE}" \
+        --output-parquet "${FINAL}" \
+        --tensor-parallel-size "${TP_SIZE}" \
+        --max-model-len "${MAX_MODEL_LEN}" \
+        "$@"
+else
+    echo "Unknown BACKEND='${BACKEND}' (use 'forward' or 'vllm')" >&2
+    exit 1
+fi

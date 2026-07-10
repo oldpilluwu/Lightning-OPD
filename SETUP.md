@@ -26,7 +26,7 @@ single **`trn2.3xlarge`** (one Trainium2 chip) running the **Qwen3-4B** scale.
 > | 1. SFT data gen | vLLM (CUDA) | vLLM **Neuron plugin** — `trainium/pipeline_neuron.py` |
 > | 2. SFT | LlamaFactory + DeepSpeed | **optimum-neuron** `NeuronTrainer` — `trainium/step2_sft_train_neuron.py` (same template/masking/packing/LR schedule) |
 > | 3. Rollouts | vLLM (CUDA) | same as step 1, with the SFT model |
-> | 4. Teacher logprobs | sglang server + HTTP | offline vLLM **prompt-logprob scoring** — `trainium/step4_teacher_logprobs_neuron.py` (same quantity, same parquet schema) |
+> | 4. Teacher logprobs | sglang server + HTTP | **forward-pass scoring** through `NeuronModelForCausalLM` — `trainium/step4_teacher_forward_neuron.py` (same quantity, same parquet schema). *vLLM `prompt_logprobs` — `step4_teacher_logprobs_neuron.py` — is broken on vllm-neuron 0.16 and kept only as `BACKEND=vllm`.* |
 > | 5. Lightning OPD | slime (Megatron+Ray) | custom `NeuronTrainer` loss — `trainium/step5_lightning_opd_train_neuron.py` (advantage = teacher logprob − student logprob, lr 2e-6, batch 256, identical) |
 > | 6. Ckpt convert | Megatron→HF script | `optimum-cli neuron consolidate` (built into the pipeline) |
 >
@@ -243,32 +243,74 @@ What sharing one account means in practice:
 
 ## 6. Smoke-test the two risk points (15–30 min, do not skip)
 
+> **Run these smoke tests from a FILE with an `if __name__ == "__main__":`
+> guard — not a `python - <<'PY'` heredoc and not bare module-level code.** vLLM
+> V1 launches its `EngineCore` in a separate process via `multiprocessing`
+> spawn, and the child re-imports the main module. A heredoc has no file to
+> re-import (`FileNotFoundError: …/<stdin>`), and a bare top-level `LLM(...)`
+> re-runs during that import and tries to spawn again (`An attempt has been made
+> to start a new process before the current process has finished its
+> bootstrapping phase`). Putting the engine call inside `main()` under the
+> `__main__` guard (below) fixes both. The pipeline scripts already do this, so
+> they're unaffected. (Quick interactive alternative:
+> `VLLM_ENABLE_V1_MULTIPROCESSING=0` runs the engine in-process.)
+
 **(a) Qwen3 generation on Neuron** — verifies the vLLM Neuron plugin +
 Qwen3 support:
 
 ```bash
-source /opt/aws_neuronx_venv_pytorch_2_7_nxd_inference/bin/activate
-python - <<'PY'
+# Use the pre-installed vLLM venv (name is auto-detected by the scripts; find it
+# with: ls /opt | grep vllm). On the current DLAMI it is:
+source /opt/aws_neuronx_venv_pytorch_inference_vllm_0_16/bin/activate
+cat > ~/smoke_gen.py <<'PY'
 from vllm import LLM, SamplingParams
-llm = LLM(model="Qwen/Qwen3-0.6B", tensor_parallel_size=2, max_model_len=2048, max_num_seqs=4)
-out = llm.chat([[{"role": "user", "content": "What is 2+2?"}]], SamplingParams(max_tokens=64))
-print(out[0].outputs[0].text)
+
+def main():
+    # enable_prefix_caching=False: V1 defaults it ON, which then demands an
+    # explicit block_size; batch gen doesn't benefit (prompts ~unique), so off.
+    llm = LLM(model="Qwen/Qwen3-0.6B", tensor_parallel_size=2, max_model_len=2048,
+              max_num_seqs=4, enable_prefix_caching=False)
+    out = llm.chat([[{"role": "user", "content": "What is 2+2?"}]], SamplingParams(max_tokens=64))
+    print(out[0].outputs[0].text)
+
+if __name__ == "__main__":   # REQUIRED — vLLM V1 spawns a subprocess
+    main()
 PY
+python ~/smoke_gen.py
 ```
 
-**(b) Prompt logprobs** (needed by step 4):
+**(b) Teacher scoring (step 4).** Step 4 defaults to `BACKEND=forward`
+(`step4_teacher_forward_neuron.py`) — a plain forward pass through
+`NeuronModelForCausalLM`, no vLLM. The smoke run exercises it, so there is no
+separate one-liner to run here; just confirm the end-to-end smoke run (§7)
+completes step 4.
+
+> **Why not vLLM `prompt_logprobs`?** We tried it on this DLAMI
+> (vllm-neuron 0.16) and it is **broken**: the default on-device sampler returns
+> no logprobs (`[None]`), and the CPU-sampling path
+> (`NEURON_ON_DEVICE_SAMPLING_DISABLED=1`) crashes — first a `Sampler` import bug
+> (`from vllm.v1.sample import sampler as Sampler` → `Sampler()` →
+> `'module' object is not callable`), then, after patching that, the model runner
+> still routes to `_sample_on_device` → `hidden_states[reorder_indices]` →
+> `IndexError`. The `BACKEND=vllm` path is retained only for future SDKs where
+> `prompt_logprobs` works; if you want to re-check it, use the [vLLM V1 NxDI
+> guide](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/libraries/nxd-inference/developer_guides/vllm-user-guide-v1.html).
+
+You *can* smoke the forward scorer directly on a tiny slice once you have an SFT
+checkpoint and a Phase-1 intermediate parquet:
 
 ```bash
-python - <<'PY'
-from vllm import LLM, SamplingParams
-llm = LLM(model="Qwen/Qwen3-0.6B", tensor_parallel_size=2, max_model_len=2048, max_num_seqs=4)
-out = llm.generate(["The capital of France is Paris."], SamplingParams(max_tokens=1, prompt_logprobs=0))
-print(out[0].prompt_logprobs[:5])
-PY
+# in the TRAIN venv (optimum-neuron), from the repo root
+NUM_CORES=4 TP_SIZE=4 torchrun --nproc_per_node=4 \
+  trainium/step4_teacher_forward_neuron.py \
+  --teacher-model Qwen/Qwen3-8B --tokenizer-path <sft_ckpt> \
+  --intermediate-parquet <stem>-lightning-opd.parquet \
+  --output-parquet /tmp/probe-precomputed.parquet \
+  --num-rows 8 --max-seq-len 8192
 ```
 
-If (b) prints a list of per-token logprob dicts, step 4 will work. If your
-Neuron vLLM build rejects `prompt_logprobs`, see §10.
+It prints the kept-logprob count and per-chunk mean/min/max (all logprobs
+should be ≤ 0).
 
 ## 7. Run the pipeline
 
@@ -452,21 +494,30 @@ HMMT / LiveCodeBench) is not part of this repo's pipeline.
   tracing and compiling the graphs (once per shape). Subsequent steps are
   fast; the cache persists in `/var/tmp/neuron-compile-cache` across runs.
   You can pre-populate caches for step 2/5 with `neuron_parallel_compile`.
-- **`prompt_logprobs` not supported by your Neuron vLLM build (step 4)**:
-  upgrade to the newest Neuron SDK / vLLM-neuron release branch first. If
-  it's still unsupported, the fallback is to compute teacher logprobs with
-  plain forward passes (`torch.log_softmax` over teacher logits, gathering
-  the actual next token) via `transformers` on `torch_xla` — open an issue or
-  ask for `--backend xla` to be added to `step4_teacher_logprobs_neuron.py`;
-  the math is 15 lines, the missing part is only teacher-size tensor
-  parallelism.
-- **optimum-neuron API drift (steps 2/5)**: the trainer scripts follow the
-  optimum-neuron 0.3.x training API (`NeuronTrainingArguments(tensor_parallel_size=…)`,
-  `NeuronModelForCausalLM.from_pretrained(model_id, training_args.trn_config)`).
-  If imports fail on your version, check
+- **Step 4 teacher scoring**: the default `BACKEND=forward`
+  (`step4_teacher_forward_neuron.py`) computes teacher logprobs with a forward
+  pass through `NeuronModelForCausalLM` + `token_logprobs()` — no vLLM. If it
+  errors, the likely spots are (a) `--max-seq-len` too small (it aborts up front
+  and prints the value to use), (b) device OOM on a large teacher — lower
+  `--batch-size` (already 1) or `MAX_MODEL_LEN`, or raise `TP_SIZE`/`NUM_CORES`
+  to shard the teacher across more cores, (c) the model-forward-without-a-Trainer
+  or static-padding assumptions needing an SDK-specific tweak (validate on a
+  `--num-rows 8` slice first, per §6(b)). The old vLLM path (`BACKEND=vllm`,
+  `step4_teacher_logprobs_neuron.py`) is **broken on vllm-neuron 0.16** — see
+  §6(b) for the exact bugs; don't use it unless a newer plugin fixes
+  `prompt_logprobs`.
+- **optimum-neuron trainer imports fail (steps 2/5)**: this DLAMI ships
+  optimum-neuron **0.4.3**, whose trainer classes (`NeuronTrainer`,
+  `NeuronSFTTrainer`, `NeuronTrainingArguments`) load a PEFT/LoRA shim that
+  needs the exact peft/trl it pins (`peft==0.17.0`, `trl==0.24.0`). Without them
+  the import fails as `type object 'LoraLinear' has no attribute 'merge'`, and
+  optimum-neuron's lazy loader masks it as a misleading "cannot import name …
+  Did you mean NeuronSFTTrainer" — the model classes still import, only the
+  trainers break. `setup_env.sh` installs these pins; if you hit it, run
+  `pip install "peft==0.17.0" "trl==0.24.0"` then re-assert numpy
+  (`pip install --force-reinstall "numpy>=2.0.0,<2.5"`). The datasets, loss, and
+  hyperparameters don't change. See the finetune-qwen3 guide for API details:
   https://huggingface.co/docs/optimum-neuron/training_tutorials/finetune_qwen3
-  and adjust the few construction lines — the datasets, loss, and
-  hyperparameters don't need to change.
 - **Device OOM in step 2/5 (training)**: on a single trn2.3xlarge chip,
   raising `TRAIN_TP` does **not** help — with `NUM_CORES=4` there is no
   data-parallel dimension, and TP only splits tensors within the same 96 GiB

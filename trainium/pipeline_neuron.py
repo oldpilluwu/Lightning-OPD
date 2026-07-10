@@ -109,6 +109,12 @@ def run_curation(args: argparse.Namespace) -> None:
         tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=args.max_model_len,
         max_num_seqs=args.max_num_seqs,
+        # vLLM V1 enables prefix caching by default, which then asserts that an
+        # explicit block_size is set ("When prefix caching is enabled, block_size
+        # must be set"). Batch generation over ~unique prompts gains nothing from
+        # it, so disable it. Set ENABLE_PREFIX_CACHING=1 to opt back in (you must
+        # then also pass a block_size via extra engine args).
+        enable_prefix_caching=os.environ.get("ENABLE_PREFIX_CACHING", "0") == "1",
         trust_remote_code=True,
     )
 

@@ -118,14 +118,20 @@ def main():
             tensor_parallel_size=args.tensor_parallel_size,
             max_model_len=args.max_model_len,
             max_num_seqs=args.max_num_seqs,
+            # See pipeline_neuron.py: V1 prefix caching is on by default and then
+            # requires an explicit block_size. Scoring gains nothing from it.
+            enable_prefix_caching=os.environ.get("ENABLE_PREFIX_CACHING", "0") == "1",
             trust_remote_code=True,
         )
         if args.override_neuron_config.strip():
             try:
-                llm_kwargs["override_neuron_config"] = json.loads(args.override_neuron_config)
+                onc = json.loads(args.override_neuron_config)
             except json.JSONDecodeError as e:
                 raise SystemExit(f"[Step 4] --override-neuron-config is not valid JSON: {e}")
-            print(f"[Step 4] override_neuron_config = {llm_kwargs['override_neuron_config']}")
+            # The vllm-neuron plugin reads this from additional_config, NOT as a
+            # direct LLM() kwarg (neuronx_distributed_model_loader.py:1050).
+            llm_kwargs["additional_config"] = {"override_neuron_config": onc}
+            print(f"[Step 4] additional_config = {llm_kwargs['additional_config']}")
         print(f"[Step 4] Loading teacher on Neuron: {args.teacher_model} "
               f"(tp={args.tensor_parallel_size})")
         llm = LLM(**llm_kwargs)
