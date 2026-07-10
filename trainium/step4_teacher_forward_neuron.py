@@ -120,6 +120,7 @@ def score_microbatch(model, seqs, pad_id, max_seq_len, vocab_size, device):
 
     # Position i predicts token i+1 (same alignment as step 5's compute_loss).
     lp = token_logprobs(logits[:, :-1, :], input_ids[:, 1:], vocab_size)  # [B, L-1]
+    xm.mark_step()          # force the lazy XLA graph to execute
     lp = lp.float().cpu()
 
     out = []
@@ -180,15 +181,16 @@ def main():
             report_to=[],
         )
         _log(f"Loading teacher: {args.teacher_model} (tp={args.tensor_parallel_size})")
+        device = xm.xla_device()
         model = NeuronModelForCausalLM.from_pretrained(
             args.teacher_model,
             training_args.trn_config,
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
         )
+        model = model.to(device)  # move weights to Neuron (no Trainer to do it)
         model.eval()
         vocab_size = model.config.vocab_size
-        device = xm.xla_device()
 
         for c in pending:
             lo, hi = c * args.chunk_size, min((c + 1) * args.chunk_size, len(rows))
