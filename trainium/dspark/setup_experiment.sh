@@ -25,6 +25,17 @@ if [[ ! -x "${PYTHON}" ]]; then
     exit 1
 fi
 
+# Invoking the venv's Python by absolute path does not activate the venv.
+# torch-neuronx starts helper programs such as libneuronpjrt-path by name, so
+# the venv's bin directory must also be present on PATH.
+export PATH="${INFER_VENV}/bin:${PATH}"
+
+if ! command -v libneuronpjrt-path >/dev/null 2>&1; then
+    echo "ERROR: libneuronpjrt-path is not available in ${INFER_VENV}/bin." >&2
+    echo "The selected environment is incomplete or is not a torch-neuronx environment." >&2
+    exit 1
+fi
+
 echo "=== Installed vLLM-Neuron DSpark experiment ==="
 echo "Neuron env: ${INFER_VENV}"
 neuron-ls

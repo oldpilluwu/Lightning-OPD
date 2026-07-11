@@ -27,6 +27,16 @@ if [[ ! -x "${PYTHON}" ]]; then
     exit 1
 fi
 
+# torch-neuronx invokes Neuron/PJRT helper executables by name. Selecting the
+# venv's Python alone is insufficient; its bin directory must be on PATH too.
+export PATH="${INFER_VENV}/bin:${PATH}"
+
+if ! command -v libneuronpjrt-path >/dev/null 2>&1; then
+    echo "ERROR: libneuronpjrt-path is not available in ${INFER_VENV}/bin." >&2
+    echo "Run setup_experiment.sh with the correct INFER_VENV." >&2
+    exit 1
+fi
+
 # Select the installed vLLM hardware plugin and keep V1 in-process. The latter
 # gives useful Python errors for this experimental path and avoids a second
 # engine process owning the same NeuronCores.
