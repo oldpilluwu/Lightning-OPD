@@ -15,17 +15,11 @@ OUTPUT_DIR="$(mkdir -p "${OUTPUT_DIR}" && cd "${OUTPUT_DIR}" && pwd)"
 NUM_CORES="${NUM_CORES:-1}"
 TP_SIZE="${TP_SIZE:-1}"
 
-if [[ "${TP_SIZE}" != "1" ]]; then
-    echo "ERROR: native TorchNeuron curation uses one model replica per logical core." >&2
-    echo "Set TP_SIZE=1; NUM_CORES controls data-parallel workers." >&2
-    exit 1
-fi
-
 cd "${REPO_ROOT}"
 exec bash trainium/sft_data_generation_native/run_curation_native.sh \
     --model "${TEACHER_MODEL}" \
     --input "${SFT_PROMPTS}" \
     --output-dir "${OUTPUT_DIR}" \
     --num-cores "${NUM_CORES}" \
-    --tensor-parallel-size 1 \
+    --tensor-parallel-size "${TP_SIZE}" \
     "$@"

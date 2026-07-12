@@ -17,8 +17,12 @@ experimental/reference path for Lightning-OPD, not an OpenAI-compatible server.
 - Phase 1 is eager Neuron correctness. Phase 2 uses
   `torch.compile(backend="neuron", dynamic=False)`. CPU FP32 is the validation
   reference and optional failure fallback, never reported as Neuron success.
-- Multiple cores are data-parallel independent replicas. Tensor parallelism would
-  require NxD and is intentionally unavailable in this pure-native path.
+- `TP_SIZE=1` uses multiple cores as independent data-parallel replicas.
+- `TP_SIZE>1` uses the native TorchNeuron `torch.distributed` backend plus PyTorch
+  DTensor `parallelize_module`; it does not use XLA or NxD. The current launcher
+  supports one TP replica, so `NUM_CORES` must equal `TP_SIZE`.
+- Qwen attention/MLP linears and KV-cache heads are sharded. Embeddings and the LM
+  head remain replicated so generation continues to sample full-vocabulary logits.
 
 The downstream format is unchanged: Arrow shards contain `messages` and an integer
 generated-token count in `tokens`; `data_curation/merge.py` produces the final parquet.
@@ -62,6 +66,20 @@ For a quick engineering check that intentionally shortens the workload:
 FAST_SMOKE=1 VALIDATE=0 bash trainium/sft_data_generation_native/generate_sft_data.sh
 ```
 
+On `trn2.3xlarge`, test native TP across all four logical NeuronCores before the
+paper-faithful smoke:
+
+```bash
+FAST_SMOKE=1 VALIDATE=0 NUM_CORES=4 TP_SIZE=4 PREFILL_BUCKET=4096 \
+  bash trainium/sft_data_generation_native/generate_sft_data.sh
+
+SMOKE=1 VALIDATE=0 NUM_CORES=4 TP_SIZE=4 PREFILL_BUCKET=4096 \
+  bash trainium/sft_data_generation_native/generate_sft_data.sh
+```
+
+Run the existing single-core validation separately first (`VALIDATE=1`, `TP_SIZE=1`).
+The distributed smoke is the hardware validation for the TP path.
+
 The full paper-scale curation is:
 
 ```bash
@@ -69,5 +87,4 @@ bash trainium/sft_data_generation_native/generate_sft_data.sh
 ```
 
 Useful experiment overrides include `MODE=eager`, `MODE=compile`, `NUM_CORES`,
-`BATCH_SIZE`, `PREFILL_BUCKET`, `MAX_TOKENS`, and `VALIDATE=0`. Start on one core;
-increase `NUM_CORES` only after accounting for one Qwen3-8B replica per worker.
+`TP_SIZE`, `BATCH_SIZE`, `PREFILL_BUCKET`, `MAX_TOKENS`, and `VALIDATE=0`.

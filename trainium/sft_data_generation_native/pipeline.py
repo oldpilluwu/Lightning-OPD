@@ -14,6 +14,7 @@ tensor shapes, as required by the Beta-3 native compile backend.
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib
 import json
 import os
@@ -53,6 +54,56 @@ def import_torchneuron() -> str:
         "No native TorchNeuron backend could be imported. Set TORCHNEURON_IMPORT "
         "to the import name supplied by the Beta-3 image. Attempts: " + "; ".join(errors)
     )
+
+
+def init_native_distributed(tp_size: int, device: torch.device) -> tuple[int, int]:
+    """Initialize the TorchNeuron c10d backend used by native DTensor TP."""
+    if tp_size == 1:
+        return 0, 1
+    if device.type != "neuron":
+        raise ValueError("native tensor parallelism requires --device neuron")
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        dist.init_process_group(backend="neuron")
+    rank, world_size = dist.get_rank(), dist.get_world_size()
+    if world_size != tp_size:
+        raise ValueError(
+            f"native TP requires torchrun world size ({world_size}) to equal "
+            f"--tensor-parallel-size ({tp_size})"
+        )
+    return rank, world_size
+
+
+def apply_native_tensor_parallel(model: torch.nn.Module, tp_size: int) -> torch.nn.Module:
+    """Apply PyTorch's existing DTensor TP plan to Qwen-family decoder layers."""
+    if tp_size == 1:
+        return model
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor.parallel import (
+        ColwiseParallel,
+        RowwiseParallel,
+        parallelize_module,
+    )
+
+    mesh = init_device_mesh("neuron", (tp_size,))
+    layer_plan = {
+        "self_attn.q_proj": ColwiseParallel(),
+        "self_attn.k_proj": ColwiseParallel(),
+        "self_attn.v_proj": ColwiseParallel(),
+        "self_attn.o_proj": RowwiseParallel(),
+        "mlp.gate_proj": ColwiseParallel(),
+        "mlp.up_proj": ColwiseParallel(),
+        "mlp.down_proj": RowwiseParallel(),
+    }
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        raise ValueError(
+            "native automatic TP currently requires a Qwen/Llama-style model.model.layers stack"
+        )
+    for layer in layers:
+        parallelize_module(layer, mesh, layer_plan)
+    return model
 
 
 def load_dataset(path: str) -> list[dict[str, Any]]:
@@ -131,13 +182,23 @@ def generate_static(
     pad_token_id: int,
     device: torch.device,
     dtype: torch.dtype,
+    tp_size: int = 1,
 ) -> list[list[int]]:
     from transformers import StaticCache
 
     batch_size, prefill_len = input_ids.shape
     total_len = prefill_len + max_new_tokens
+    cache_config = model.config
+    if tp_size > 1:
+        cache_config = copy.deepcopy(model.config)
+        kv_heads = int(cache_config.num_key_value_heads)
+        if kv_heads % tp_size:
+            raise ValueError(
+                f"num_key_value_heads ({kv_heads}) must be divisible by TP size ({tp_size})"
+            )
+        cache_config.num_key_value_heads = kv_heads // tp_size
     cache = StaticCache(
-        config=model.config,
+        config=cache_config,
         max_batch_size=batch_size,
         max_cache_len=total_len,
         device=device,
@@ -202,10 +263,12 @@ def load_model_and_tokenizer(args: argparse.Namespace, device: torch.device) -> 
     started = time.monotonic()
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=dtype,
+        dtype=dtype,
         attn_implementation="eager",
         trust_remote_code=True,
-    ).to(device=device).eval()
+    )
+    model = apply_native_tensor_parallel(model, args.tensor_parallel_size)
+    model = model.to(device=device).eval()
     print(f"[model] loaded {args.model} on {device} as {dtype} in {time.monotonic() - started:.1f}s")
     if args.mode == "compile":
         print(f"[compile] backend={args.compile_backend} dynamic=False fullgraph={args.fullgraph}")
@@ -233,27 +296,39 @@ def load_model_and_tokenizer(args: argparse.Namespace, device: torch.device) -> 
 
 
 def run_curation(args: argparse.Namespace) -> None:
-    tag = f"[rank {args.rank}/{args.world_size}]"
     requested_device = torch.device(args.device)
     if requested_device.type == "neuron":
         backend_import = import_torchneuron()
+        dist_rank, dist_world_size = init_native_distributed(
+            args.tensor_parallel_size, requested_device
+        )
+        if args.tensor_parallel_size > 1:
+            requested_device = torch.device("neuron", torch.neuron.current_device())
+        args.rank, args.world_size = dist_rank, dist_world_size
+    tag = f"[rank {args.rank}/{args.world_size}]"
+    if requested_device.type == "neuron":
         print(f"{tag} native backend import: {backend_import}")
 
     dataset = load_dataset(args.input)
     if args.num_samples is not None:
         dataset = dataset[: args.num_samples]
-    dataset = dataset[args.rank :: args.world_size]
+    # TP ranks execute the same prompts; only rank zero persists their replicated result.
+    if args.tensor_parallel_size == 1:
+        dataset = dataset[args.rank :: args.world_size]
     print(f"{tag} assigned {len(dataset)} prompts")
     if not dataset:
         return
 
     output_dir = Path(args.output_dir)
-    if args.world_size > 1:
+    writer_rank = args.tensor_parallel_size == 1 or args.rank == 0
+    if args.world_size > 1 and args.tensor_parallel_size == 1:
         output_dir /= f"rank{args.rank:05d}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if writer_rank:
+        output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_file = checkpoint_dir / f"rank{args.rank:05d}.pkl"
+    checkpoint_rank = 0 if args.tensor_parallel_size > 1 else args.rank
+    checkpoint_file = checkpoint_dir / f"rank{checkpoint_rank:05d}.pkl"
     start_idx = 0
     if checkpoint_file.exists():
         with open(checkpoint_file, "rb") as handle:
@@ -297,6 +372,7 @@ def run_curation(args: argparse.Namespace) -> None:
             pad_token_id=tokenizer.pad_token_id,
             device=requested_device,
             dtype=dtype,
+            tp_size=args.tensor_parallel_size,
         )
         rows = []
         for item, token_ids in zip(real_batch, generated):
@@ -315,17 +391,20 @@ def run_curation(args: argparse.Namespace) -> None:
 
         batch_idx = batch_start // args.batch_size
         arrow_path = output_dir / f"data-{batch_idx:05d}-of-{total_batches:05d}.arrow"
-        save_batch_arrow(rows, arrow_path)
+        if writer_rank:
+            save_batch_arrow(rows, arrow_path)
         next_idx = min(batch_start + args.batch_size, len(dataset))
-        with open(checkpoint_file, "wb") as handle:
-            pickle.dump({"next_idx": next_idx}, handle)
-        print(
-            f"{tag} batch {batch_idx + 1}/{total_batches}: {len(rows)} rows -> "
-            f"{arrow_path.name} ({time.monotonic() - started:.1f}s)"
-        )
+        if writer_rank:
+            with open(checkpoint_file, "wb") as handle:
+                pickle.dump({"next_idx": next_idx}, handle)
+            print(
+                f"{tag} batch {batch_idx + 1}/{total_batches}: {len(rows)} rows -> "
+                f"{arrow_path.name} ({time.monotonic() - started:.1f}s)"
+            )
 
-    checkpoint_file.unlink(missing_ok=True)
-    print(f"{tag} complete: {len(dataset)} rows -> {output_dir}")
+    if writer_rank:
+        checkpoint_file.unlink(missing_ok=True)
+        print(f"{tag} complete: {len(dataset)} rows -> {output_dir}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -349,22 +428,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rank", type=int, default=int(os.environ.get("RANK", 0)))
     parser.add_argument("--world-size", type=int, default=int(os.environ.get("WORLD_SIZE", 1)))
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--checkpoint-dir", default="agent_artifacts/data/curation_checkpoints")
     args = parser.parse_args()
     if args.num_responses != 1:
         parser.error("native static generation currently supports --num-responses 1")
-    if min(args.prefill_bucket, args.max_tokens, args.batch_size, args.world_size) <= 0:
+    if min(
+        args.prefill_bucket,
+        args.max_tokens,
+        args.batch_size,
+        args.world_size,
+        args.tensor_parallel_size,
+    ) <= 0:
         parser.error("prefill bucket, max tokens, batch size, and world size must be positive")
     if not 0 < args.top_p <= 1:
         parser.error("--top-p must be in (0, 1]")
     if not 0 <= args.rank < args.world_size:
         parser.error("--rank must satisfy 0 <= rank < world-size")
+    if args.allow_cpu_fallback and args.tensor_parallel_size > 1:
+        parser.error("CPU fallback is not supported for a native distributed TP run")
     return args
 
 
 def main() -> None:
     args = parse_args()
-    torch.manual_seed(args.seed + args.rank)
+    # All TP ranks must make identical CPU sampling decisions.
+    torch.manual_seed(args.seed if args.tensor_parallel_size > 1 else args.seed + args.rank)
     try:
         run_curation(args)
     except Exception:
@@ -375,6 +464,9 @@ def main() -> None:
         args.mode = "eager"
         args.dtype = "float32"
         run_curation(args)
+    finally:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

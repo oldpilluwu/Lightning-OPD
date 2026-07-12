@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Launch independent pure-native PyTorch workers, one per logical NeuronCore.
+# Launch native PyTorch workers as independent replicas or one DTensor TP group.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 NUM_CORES=1
+TP_SIZE=1
 PIPELINE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --num-cores) NUM_CORES="$2"; shift 2 ;;
-        --tensor-parallel-size)
-            if [[ "$2" != "1" ]]; then
-                echo "ERROR: pure native data curation has no tensor parallelism; use TP_SIZE=1." >&2
-                exit 1
-            fi
-            shift 2 ;;
+        --tensor-parallel-size) TP_SIZE="$2"; shift 2 ;;
         *) PIPELINE_ARGS+=("$1"); shift ;;
     esac
 done
@@ -27,11 +23,29 @@ NODE_RANK="${NODE_RANK:-0}"
 WORLD_SIZE=$((NUM_CORES * NUM_NODES))
 cd "${REPO_ROOT}"
 
+if [[ "${TP_SIZE}" -gt 1 ]]; then
+    [[ "${NUM_NODES}" == "1" ]] || { echo "ERROR: native TP launcher currently supports one node." >&2; exit 1; }
+    [[ "${NUM_CORES}" == "${TP_SIZE}" ]] || {
+        echo "ERROR: set NUM_CORES equal to TP_SIZE for one native TP replica." >&2; exit 1;
+    }
+fi
+
 echo "=== Native PyTorch data curation ==="
 echo "mode:        Transformers + TorchNeuron (no vLLM/XLA/NxD)"
 echo "node:        ${NODE_RANK}/${NUM_NODES}"
-echo "workers:     ${NUM_CORES} (one model replica per logical core)"
+echo "workers:     ${NUM_CORES}"
+echo "TP size:     ${TP_SIZE}"
 echo "world size:  ${WORLD_SIZE}"
+
+if [[ "${TP_SIZE}" -gt 1 ]]; then
+    export NEURON_CC_FLAGS="${NEURON_CC_FLAGS:-} --model-type=transformer"
+    exec torchrun \
+        --standalone \
+        --nproc-per-node "${NUM_CORES}" \
+        -m trainium.sft_data_generation_native.pipeline \
+        --tensor-parallel-size "${TP_SIZE}" \
+        "${PIPELINE_ARGS[@]}"
+fi
 
 PIDS=()
 for ((LOCAL_RANK=0; LOCAL_RANK<NUM_CORES; LOCAL_RANK++)); do

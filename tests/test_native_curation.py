@@ -8,6 +8,7 @@ from unittest.mock import patch
 import torch
 
 from trainium.sft_data_generation_native.pipeline import (
+    apply_native_tensor_parallel,
     generate_static,
     load_dataset,
     render_prompt,
@@ -24,14 +25,17 @@ class FakeTokenizer:
 
 
 class FakeStaticCache:
+    last_kwargs = None
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        type(self).last_kwargs = kwargs
 
 
 class FakeModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.config = SimpleNamespace()
+        self.config = SimpleNamespace(num_key_value_heads=4)
         self.calls = []
 
     def forward(self, input_ids, attention_mask, **kwargs):
@@ -53,6 +57,10 @@ class RecordingCaller:
 
 
 class NativeCurationTests(unittest.TestCase):
+    def test_tp_size_one_is_noop(self):
+        model = FakeModel()
+        self.assertIs(apply_native_tensor_parallel(model, 1), model)
+
     def test_greedy_sampling_uses_fp32_cpu(self):
         logits = torch.tensor([[0.0, 3.0, 1.0]], dtype=torch.bfloat16)
         sampled = top_p_sample_cpu(logits, temperature=0.0, top_p=1.0)
@@ -110,6 +118,25 @@ class NativeCurationTests(unittest.TestCase):
             )
         self.assertEqual(prefill_calls, [(1, 2)])
         self.assertEqual(decode_calls, [(1, 1)])
+
+    def test_tp_static_cache_uses_local_kv_heads(self):
+        model = FakeModel()
+        with patch("transformers.StaticCache", FakeStaticCache):
+            generate_static(
+                model,
+                torch.tensor([[7, 8]]),
+                torch.tensor([[1, 1]]),
+                max_new_tokens=1,
+                temperature=0.0,
+                top_p=1.0,
+                eos_token_ids={2},
+                pad_token_id=0,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                tp_size=2,
+            )
+        self.assertEqual(FakeStaticCache.last_kwargs["config"].num_key_value_heads, 2)
+        self.assertEqual(model.config.num_key_value_heads, 4)
 
 
 if __name__ == "__main__":

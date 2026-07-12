@@ -35,9 +35,11 @@ NATIVE_VENV="${NATIVE_VENV:-${HOME}/workspace/native_venv}"
 [[ "${SMOKE}" =~ ^[01]$ && "${FAST_SMOKE}" =~ ^[01]$ ]] || {
     echo "ERROR: SMOKE and FAST_SMOKE must be 0 or 1." >&2; exit 1;
 }
-[[ "${TP_SIZE}" == "1" ]] || {
-    echo "ERROR: pure native PyTorch has no TP here; set TP_SIZE=1." >&2; exit 1;
-}
+[[ "${TP_SIZE}" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: TP_SIZE must be positive." >&2; exit 1; }
+if [[ "${TP_SIZE}" -gt 1 && "${NUM_CORES}" != "${TP_SIZE}" ]]; then
+    echo "ERROR: set NUM_CORES equal to TP_SIZE for one native TP replica." >&2
+    exit 1
+fi
 [[ -f "${NATIVE_VENV}/bin/activate" ]] || {
     echo "ERROR: native Beta-3 venv not found: ${NATIVE_VENV}" >&2
     echo "Run trainium/sft_data_generation_native/setup_env.sh first." >&2
@@ -71,7 +73,7 @@ mkdir -p "$(dirname "${PROMPT_FILE}")" "${PARTS_DIR}" "${CURATION_CKPT}" "${TRAC
 
 echo "=== Native TorchNeuron SFT curation ==="
 echo "teacher=${TEACHER_MODEL} dataset=${HF_DATASET} samples=${SFT_SAMPLES} seed=${SEED}"
-echo "mode=${MODE} cores=${NUM_CORES} batch=${BATCH_SIZE} prefill=${PREFILL_BUCKET} max_tokens=${MAX_TOKENS}"
+echo "mode=${MODE} cores=${NUM_CORES} tp=${TP_SIZE} batch=${BATCH_SIZE} prefill=${PREFILL_BUCKET} max_tokens=${MAX_TOKENS}"
 echo "sampling: temperature=${TEMPERATURE} top_p=${TOP_P}"
 
 if [[ ! -f "${PROMPT_FILE}" ]]; then
@@ -94,7 +96,7 @@ TEACHER_MODEL="${TEACHER_MODEL}" \
 SFT_PROMPTS="${PROMPT_FILE}" \
 OUTPUT_DIR="${PARTS_DIR}" \
 NUM_CORES="${NUM_CORES}" \
-TP_SIZE=1 \
+TP_SIZE="${TP_SIZE}" \
 bash trainium/step1_generate_sft_data.sh \
     --device neuron \
     --mode "${MODE}" \
@@ -134,6 +136,7 @@ cat > "${TRACE_DIR}/port_summary.md" <<EOF
 - Device: neuron; dtype: bfloat16; mode: ${MODE}
 - Sampling: temperature ${TEMPERATURE}, top-p ${TOP_P}, max new tokens ${MAX_TOKENS}
 - Static shapes: batch ${BATCH_SIZE}, prefill bucket ${PREFILL_BUCKET}, StaticCache
+- Native tensor parallel size: ${TP_SIZE}
 - CPU fallback: not enabled
 - Output: ${FINAL_PARQUET}
 - Validation: $(if [[ "${VALIDATE}" == "1" ]]; then echo "CPU fp32 vs eager+compiled Neuron greedy token gate passed"; else echo "skipped by VALIDATE=0"; fi)
