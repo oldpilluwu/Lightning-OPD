@@ -13,18 +13,19 @@
 #
 # Usage:
 #   SCALE=4b bash trainium/run_pipeline.sh          # Qwen3-4B-Base + Qwen3-8B teacher
-#   SCALE=4b SMOKE=1 bash trainium/run_pipeline.sh  # tiny end-to-end test (5k SFT / 2k OPD)
+#   SCALE=4b SMOKE=1 bash trainium/run_pipeline.sh  # faithful 64-prompt/rollout mini-run
 #   SCALE=8b bash trainium/run_pipeline.sh          # Qwen3-8B (see 8B note below)
 #
 # Hardware note (trn2.3xlarge = 1 Trainium2 chip):
 #   A Trainium2 chip has 8 physical NeuronCores, exposed as 4 LOGICAL cores
 #   under the default LNC=2 config (verify with `neuron-ls`). Software (this
-#   script, torchrun, vLLM) addresses the 4 logical cores, so NUM_CORES=4 and
+#   script and torchrun address the 4 logical cores, so NUM_CORES=4 and
 #   TP<=4. All sharding happens inside one 96 GiB HBM pool (no data
 #   parallelism), which is the binding constraint — see the 8B note.
 #
 # Key environment overrides:
-#   INFER_VENV / TRAIN_VENV - Neuron venv paths (see setup_env.sh)
+#   NATIVE_VENV              - Beta-3 native TorchNeuron venv for SFT curation
+#   INFER_VENV / TRAIN_VENV  - optional legacy scorer / training venvs
 #   SFT_SAMPLES             - SFT prompt count            (default 300000)
 #   OPD_STEPS               - Lightning OPD steps         (default 150)
 #   NUM_CORES               - logical NeuronCores         (default 4 = trn2.3xlarge)
@@ -53,6 +54,17 @@ TRAIN_TP="${TRAIN_TP:-4}"          # tensor-parallel size for SFT/OPD (<= NUM_CO
 # broken on vllm-neuron 0.16 (see step4_teacher_forward_neuron.py). "vllm" keeps
 # the old offline-prompt-logprob path (INFER venv) for SDKs where it works.
 TEACHER_BACKEND="${TEACHER_BACKEND:-forward}"
+NATIVE_RUNTIME_ENV="${SCRIPT_DIR}/sft_data_generation_native/runtime.env"
+if [[ -f "${NATIVE_RUNTIME_ENV}" ]]; then
+    # shellcheck disable=SC1090
+    source "${NATIVE_RUNTIME_ENV}"
+fi
+NATIVE_VENV="${NATIVE_VENV:-${HOME}/workspace/native_venv}"
+[[ -f "${NATIVE_VENV}/bin/activate" ]] || {
+    echo "ERROR: Beta-3 native venv not found: ${NATIVE_VENV}" >&2
+    echo "Run trainium/sft_data_generation_native/setup_env.sh first." >&2
+    exit 1
+}
 # CUTOFF_LEN is defaulted below to 16384 (paper); the smoke run keeps it (the
 # smoke run mirrors the real config, only the dataset and step count shrink).
 # Auto-detect the Neuron DLAMI venvs by role — names carry the torch version
@@ -67,10 +79,11 @@ _pick_venv() {  # $1 = grep -E pattern on basename; prints first /opt match
     done
     return 1
 }
-if [[ -z "${INFER_VENV:-}" ]]; then
+if [[ "${TEACHER_BACKEND}" == "vllm" && -z "${INFER_VENV:-}" ]]; then
     INFER_VENV="$(_pick_venv 'vllm')" || INFER_VENV="$(_pick_venv 'inference')" \
         || { echo "ERROR: no inference venv under /opt; set INFER_VENV manually." >&2; exit 1; }
 fi
+INFER_VENV="${INFER_VENV:-${NATIVE_VENV}}"
 if [[ -z "${TRAIN_VENV:-}" ]]; then
     for d in /opt/aws_neuronx_venv_pytorch_*; do
         case "$(basename "${d}")" in *inference*|*vllm*) continue ;; esac
@@ -81,6 +94,7 @@ if [[ -z "${TRAIN_VENV:-}" ]]; then
 fi
 echo "[run_pipeline] INFER_VENV=${INFER_VENV}"
 echo "[run_pipeline] TRAIN_VENV=${TRAIN_VENV}"
+echo "[run_pipeline] NATIVE_VENV=${NATIVE_VENV}"
 
 case "${SCALE}" in
     4b)
@@ -205,11 +219,22 @@ stage_prompts() {
 }
 
 stage_sft_data() {
+    if [[ "${NATIVE_VALIDATE:-1}" == "1" ]]; then
+        TORCH_LOGS="graph_breaks,recompiles" \
+        python -m trainium.sft_data_generation_native.validate_native \
+            --model "${TEACHER}" \
+            --output agent_artifacts/traces/native_validation.json
+    fi
     TEACHER_MODEL="${TEACHER}" \
     SFT_PROMPTS="data/prompts/openthoughts3_${SFT_SAMPLES}.jsonl" \
     OUTPUT_DIR="data/sft_data" \
-    NUM_CORES="${NUM_CORES}" TP_SIZE="${GEN_TP}" \
-    bash "${SCRIPT_DIR}/step1_generate_sft_data.sh" "${SFT_GEN_ARGS[@]}"
+    NUM_CORES="${NUM_CORES}" TP_SIZE=1 \
+    TORCH_LOGS="graph_breaks,recompiles" \
+    bash "${SCRIPT_DIR}/step1_generate_sft_data.sh" \
+        --mode "${SFT_GEN_MODE:-compile}" \
+        --batch-size "${SFT_GEN_BATCH_SIZE:-1}" \
+        --prefill-bucket "${SFT_PREFILL_BUCKET:-512}" \
+        "${SFT_GEN_ARGS[@]}"
 }
 
 stage_sft_merge() {
@@ -236,11 +261,22 @@ stage_sft_consolidate() {
 }
 
 stage_rollouts() {
+    if [[ "${ROLLOUT_NATIVE_VALIDATE:-1}" == "1" ]]; then
+        TORCH_LOGS="graph_breaks,recompiles" \
+        python -m trainium.sft_data_generation_native.validate_native \
+            --model "${SFT_HF_DIR}" \
+            --output agent_artifacts/traces/native_rollout_validation.json
+    fi
     SFT_CHECKPOINT="${SFT_HF_DIR}" \
     OPD_PROMPTS="data/prompts/dapo-math-17k/dapo-math-17k.jsonl" \
     OUTPUT_DIR="data/rollouts" \
-    NUM_CORES="${NUM_CORES}" TP_SIZE="${GEN_TP}" \
-    bash "${SCRIPT_DIR}/step3_collect_rollouts.sh" "${EXTRA_GEN_ARGS[@]}"
+    NUM_CORES="${NUM_CORES}" TP_SIZE=1 \
+    TORCH_LOGS="graph_breaks,recompiles" \
+    bash "${SCRIPT_DIR}/step3_collect_rollouts.sh" \
+        --mode "${ROLLOUT_GEN_MODE:-compile}" \
+        --batch-size "${ROLLOUT_GEN_BATCH_SIZE:-1}" \
+        --prefill-bucket "${ROLLOUT_PREFILL_BUCKET:-512}" \
+        "${EXTRA_GEN_ARGS[@]}"
 }
 
 stage_rollout_merge() {
@@ -278,13 +314,13 @@ stage_opd_consolidate() {
 # ── Pipeline ──────────────────────────────────────────────────────────────
 echo "=== Lightning OPD on Trainium: SCALE=${SCALE} student=${STUDENT_BASE} teacher=${TEACHER} ==="
 
-run_stage prompts            "${INFER_VENV}" stage_prompts            # step 0
-run_stage sft_data           "${INFER_VENV}" stage_sft_data           # step 1
-run_stage sft_merge          "${INFER_VENV}" stage_sft_merge
+run_stage prompts            "${NATIVE_VENV}" stage_prompts           # step 0
+run_stage sft_data           "${NATIVE_VENV}" stage_sft_data           # step 1
+run_stage sft_merge          "${NATIVE_VENV}" stage_sft_merge
 run_stage sft_train          "${TRAIN_VENV}" stage_sft_train          # step 2
 run_stage sft_consolidate    "${TRAIN_VENV}" stage_sft_consolidate
-run_stage rollouts           "${INFER_VENV}" stage_rollouts           # step 3
-run_stage rollout_merge      "${INFER_VENV}" stage_rollout_merge
+run_stage rollouts           "${NATIVE_VENV}" stage_rollouts           # step 3
+run_stage rollout_merge      "${NATIVE_VENV}" stage_rollout_merge
 # Step 4 venv depends on the backend: "forward" runs in the TRAIN venv
 # (optimum-neuron + torchrun), "vllm" in the INFER venv.
 if [[ "${TEACHER_BACKEND}" == "vllm" ]]; then TEACHER_VENV="${INFER_VENV}"; else TEACHER_VENV="${TRAIN_VENV}"; fi

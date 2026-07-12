@@ -10,7 +10,7 @@
 #   OUTPUT_DIR     - output directory
 # Optional:
 #   NUM_CORES      - logical NeuronCores (default: 4 = one trn2.3xlarge chip)
-#   TP_SIZE        - NeuronCores per vLLM worker (default: 4)
+#   TP_SIZE        - must be 1; workers are independent native model replicas
 
 set -euo pipefail
 
@@ -22,8 +22,8 @@ SFT_CHECKPOINT="$(cd "$(dirname "${SFT_CHECKPOINT}")" && pwd)/$(basename "${SFT_
 OPD_PROMPTS="$(cd "$(dirname "${OPD_PROMPTS}")" && pwd)/$(basename "${OPD_PROMPTS}")"
 OUTPUT_DIR="$(mkdir -p "${OUTPUT_DIR}" && cd "${OUTPUT_DIR}" && pwd)"
 
-NUM_CORES="${NUM_CORES:-4}"
-TP_SIZE="${TP_SIZE:-4}"
+NUM_CORES="${NUM_CORES:-1}"
+TP_SIZE="${TP_SIZE:-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 bash "${SCRIPT_DIR}/run_curation_neuron.sh" \

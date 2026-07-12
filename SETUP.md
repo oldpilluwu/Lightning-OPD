@@ -23,15 +23,16 @@ single **`trn2.3xlarge`** (one Trainium2 chip) running the **Qwen3-4B** scale.
 > | Step | Original (CUDA) | Trainium port |
 > |---|---|---|
 > | 0. Prompts | `scripts/prepare_sft_prompts.py` (CPU) | **unchanged** |
-> | 1. SFT data gen | vLLM (CUDA) | vLLM **Neuron plugin** — `trainium/pipeline_neuron.py` |
+> | 1. SFT data gen | vLLM (CUDA) | **native PyTorch/TorchNeuron Beta-3** — `trainium/sft_data_generation_native/pipeline.py` (Transformers, no vLLM/NxD/XLA) |
 > | 2. SFT | LlamaFactory + DeepSpeed | **optimum-neuron** `NeuronTrainer` — `trainium/step2_sft_train_neuron.py` (same template/masking/packing/LR schedule) |
-> | 3. Rollouts | vLLM (CUDA) | same as step 1, with the SFT model |
+> | 3. Rollouts | vLLM (CUDA) | same native PyTorch path as step 1, with the SFT model |
 > | 4. Teacher logprobs | sglang server + HTTP | **forward-pass scoring** through `NeuronModelForCausalLM` — `trainium/step4_teacher_forward_neuron.py` (same quantity, same parquet schema). *vLLM `prompt_logprobs` — `step4_teacher_logprobs_neuron.py` — is broken on vllm-neuron 0.16 and kept only as `BACKEND=vllm`.* |
 > | 5. Lightning OPD | slime (Megatron+Ray) | custom `NeuronTrainer` loss — `trainium/step5_lightning_opd_train_neuron.py` (advantage = teacher logprob − student logprob, lr 2e-6, batch 256, identical) |
 > | 6. Ckpt convert | Megatron→HF script | `optimum-cli neuron consolidate` (built into the pipeline) |
 >
-> These scripts were written against **Neuron SDK ≥ 2.24** (Qwen3 support in
-> NxD Inference) and **optimum-neuron ≥ 0.3.0** (Qwen3 training support) and
+> The SFT curation stage requires the private **TorchNeuron Beta-3** environment
+> (PyTorch 2.11 native eager + `torch.compile`); later stages use
+> **optimum-neuron ≥ 0.3.0** and the existing inference environment. They
 > have **not been validated on real Trainium hardware** — run the smoke test
 > (§7) before committing to the full run. On **Trainium2 (trn2.x)** use a
 > recent SDK; the defaults assume the single-chip `trn2.3xlarge` (4 logical
@@ -47,10 +48,10 @@ with **8 physical NeuronCores exposed as 4 logical NeuronCores** (the default
 LNC=2 config groups two physical cores into one logical core), **96 GiB HBM**,
 and ~24 vCPUs. Confirm the core count on the instance with `neuron-ls`.
 
-- Because the chip presents **4 logical cores**, the scripts default to
-  `NUM_CORES=4` and tensor-parallel size `4` (one worker uses the whole chip;
-  there is no data-parallel dimension). Do not set these above 4 on this
-  instance.
+- Because the chip presents **4 logical cores**, training defaults to tensor
+  parallel size 4. Pure-native SFT curation instead runs one independent
+  Qwen3-8B replica per selected logical core (`TP_SIZE=1`); start with one
+  worker, then raise `NUM_CORES` after checking per-core memory.
 - Regions with Trn2: **us-east-1 (N. Virginia)**, **us-east-2 (Ohio)**,
   **us-west-2 (Oregon)**. Pick one and stay in it. Trn2 quota is often only
   available via **EC2 Capacity Blocks for ML** — check availability before
@@ -165,12 +166,14 @@ cd Lightning-OPD
 scp -i $HOME\Downloads\trainium-key.pem -r C:\Users\fawwa\projects\Lightning-OPD ubuntu@<PUBLIC_IP>:~/
 ```
 
-Then install the two Python environments (inference = vLLM-on-Neuron;
-training = optimum-neuron):
+Set up the ordinary inference/training environments, then validate the private
+Beta-3 native environment used for SFT curation:
 
 ```bash
 cd ~/Lightning-OPD
 bash trainium/setup_env.sh
+NATIVE_VENV=$HOME/workspace/native_venv \
+  bash trainium/sft_data_generation_native/setup_env.sh
 ```
 
 Check the venv names it prints; if your DLAMI uses a different PyTorch
@@ -241,42 +244,19 @@ What sharing one account means in practice:
   tmux attach -t opd       # everyone else attaches to the same session
   ```
 
-## 6. Smoke-test the two risk points (15–30 min, do not skip)
+## 6. Smoke-test the two risk points (do not skip)
 
-> **Run these smoke tests from a FILE with an `if __name__ == "__main__":`
-> guard — not a `python - <<'PY'` heredoc and not bare module-level code.** vLLM
-> V1 launches its `EngineCore` in a separate process via `multiprocessing`
-> spawn, and the child re-imports the main module. A heredoc has no file to
-> re-import (`FileNotFoundError: …/<stdin>`), and a bare top-level `LLM(...)`
-> re-runs during that import and tries to spawn again (`An attempt has been made
-> to start a new process before the current process has finished its
-> bootstrapping phase`). Putting the engine call inside `main()` under the
-> `__main__` guard (below) fixes both. The pipeline scripts already do this, so
-> they're unaffected. (Quick interactive alternative:
-> `VLLM_ENABLE_V1_MULTIPROCESSING=0` runs the engine in-process.)
-
-**(a) Qwen3 generation on Neuron** — verifies the vLLM Neuron plugin +
-Qwen3 support:
+**(a) Native Qwen3 generation on Neuron** — verifies eager dispatch, the
+`torch.compile(backend="neuron")` path, and CPU-fp32 numerical agreement before
+running sampled curation:
 
 ```bash
-# Use the pre-installed vLLM venv (name is auto-detected by the scripts; find it
-# with: ls /opt | grep vllm). On the current DLAMI it is:
-source /opt/aws_neuronx_venv_pytorch_inference_vllm_0_16/bin/activate
-cat > ~/smoke_gen.py <<'PY'
-from vllm import LLM, SamplingParams
+source "$HOME/workspace/native_venv/bin/activate"
+python -m trainium.sft_data_generation_native.check_env
+python -m trainium.sft_data_generation_native.validate_native --model Qwen/Qwen3-8B
 
-def main():
-    # enable_prefix_caching=False: V1 defaults it ON, which then demands an
-    # explicit block_size; batch gen doesn't benefit (prompts ~unique), so off.
-    llm = LLM(model="Qwen/Qwen3-0.6B", tensor_parallel_size=2, max_model_len=2048,
-              max_num_seqs=4, enable_prefix_caching=False)
-    out = llm.chat([[{"role": "user", "content": "What is 2+2?"}]], SamplingParams(max_tokens=64))
-    print(out[0].outputs[0].text)
-
-if __name__ == "__main__":   # REQUIRED — vLLM V1 spawns a subprocess
-    main()
-PY
-python ~/smoke_gen.py
+# Then exercise the paper configuration on 64 real OpenThoughts3 prompts.
+SMOKE=1 bash trainium/sft_data_generation_native/generate_sft_data.sh
 ```
 
 **(b) Teacher scoring (step 4).** Step 4 defaults to `BACKEND=forward`
@@ -386,8 +366,12 @@ Useful knobs (env vars for `run_pipeline.sh`):
 |---|---|---|
 | `NUM_CORES` | 4 | Logical NeuronCores (4 = one trn2.3xlarge chip; 32 for trn1.32xlarge) |
 | `TRAIN_TP` | 4 | Tensor-parallel size for SFT/OPD (must divide `NUM_CORES`) |
-| `GEN_TP` | `NUM_CORES` | NeuronCores per vLLM worker in generation/scoring |
+| `GEN_TP` | `NUM_CORES` | Tensor parallelism for later rollout/scoring stages; native SFT curation always uses TP=1 |
 | `SFT_SAMPLES` | 300000 | SFT prompts sampled from OpenThoughts3-1.2M (reduce on 1 chip) |
+| `SFT_GEN_MODE` | `compile` | Native SFT generation phase (`eager` for bring-up experiments) |
+| `SFT_GEN_BATCH_SIZE` | 1 | Static native generation batch; raise only after measuring per-core HBM |
+| `NATIVE_VALIDATE` | 1 | Gate native eager+compiled generation against an fp32 CPU greedy reference |
+| `ROLLOUT_NATIVE_VALIDATE` | 1 | Apply the same gate to the consolidated SFT model before rollouts |
 | `SFT_STEPS` | 3000 | SFT optimizer steps (paper value) |
 | `OPD_STEPS` | 150 | Lightning OPD steps (README: ~150 converges; paper config caps at 3000) |
 | `SFT_GBS` | 256 (4b) / 128 (8b) | SFT global batch (matches LlamaFactory configs) |
