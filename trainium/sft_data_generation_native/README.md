@@ -26,10 +26,19 @@ generated-token count in `tokens`; `data_curation/merge.py` produces the final p
 ## Beta-3 setup
 
 Use the matching private Beta-3 DLC/runtime/driver described by the supplied Native
-PyTorch User Guide. Then validate the environment:
+PyTorch User Guide. If you already copied the DLC `/workspace` artifacts to
+`$HOME/workspace`, this creates and validates `$HOME/workspace/native_venv`:
 
 ```bash
 NATIVE_VENV=$HOME/workspace/native_venv \
+  bash trainium/sft_data_generation_native/setup_env.sh
+```
+
+If the artifacts are not present yet, pass the private DLC URI from the guide or
+your AWS account team:
+
+```bash
+BETA_IMAGE_URI=<private-beta-dlc-uri> \
   bash trainium/sft_data_generation_native/setup_env.sh
 ```
 

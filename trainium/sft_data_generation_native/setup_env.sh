@@ -1,23 +1,98 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Validate the private Beta-3 native TorchNeuron environment for SFT curation.
+# Bootstrap and validate the private Beta-3 native TorchNeuron environment.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-NATIVE_VENV="${NATIVE_VENV:-${HOME}/workspace/native_venv}"
+NATIVE_WORKSPACE="${NATIVE_WORKSPACE:-${HOME}/workspace}"
+NATIVE_VENV="${NATIVE_VENV:-${NATIVE_WORKSPACE}/native_venv}"
 HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
+BETA_IMAGE_URI="${BETA_IMAGE_URI:-}"
+BETA_ECR_REGION="${BETA_ECR_REGION:-us-east-1}"
+INSTALL_RUNTIME_DEBS="${INSTALL_RUNTIME_DEBS:-1}"
 
-cd "${REPO_ROOT}"
-[[ "$(uname -s)" == "Linux" ]] || { echo "ERROR: run this on the Neuron Linux host." >&2; exit 1; }
-[[ -f "${NATIVE_VENV}/bin/activate" ]] || {
-    echo "ERROR: Beta-3 native venv not found: ${NATIVE_VENV}" >&2
-    echo "Create it from the private Beta-3 DLC artifacts described in the user guide." >&2
+die() {
+    echo "ERROR: $*" >&2
     exit 1
 }
-command -v neuron-ls >/dev/null || { echo "ERROR: neuron-ls is unavailable." >&2; exit 1; }
+
+have_beta_artifacts() {
+    [[ -d "${NATIVE_WORKSPACE}/torch_neuron_eager" ]] \
+        && compgen -G "${NATIVE_WORKSPACE}/nki_wheels/nki-0.4.0*-cp312-cp312-linux_x86_64.whl" >/dev/null \
+        && compgen -G "${NATIVE_WORKSPACE}/neuronx_cc_wheels/neuronx_cc-2.*-cp312-cp312-linux_x86_64.whl" >/dev/null
+}
+
+extract_beta_artifacts() {
+    if [[ -z "${BETA_IMAGE_URI}" ]]; then
+        cat >&2 <<EOF
+Beta-3 artifacts were not found under ${NATIVE_WORKSPACE}.
+
+Run this script with the private DLC URI from the Native PyTorch Beta-3 guide:
+
+  BETA_IMAGE_URI=<private-beta-dlc-uri> \\
+  bash trainium/sft_data_generation_native/setup_env.sh
+
+The guide's flow is: docker pull the private DLC, copy /workspace to
+${NATIVE_WORKSPACE}, install runtime_artifacts/*.deb, then create native_venv.
+EOF
+        exit 1
+    fi
+
+    command -v docker >/dev/null || die "docker is required to pull ${BETA_IMAGE_URI}"
+    command -v aws >/dev/null || die "aws CLI is required for private ECR login"
+    mkdir -p "${NATIVE_WORKSPACE}"
+    local registry
+    registry="${BETA_IMAGE_URI%%/*}"
+    aws ecr get-login-password --region "${BETA_ECR_REGION}" \
+        | docker login --username AWS --password-stdin "${registry}"
+    docker pull "${BETA_IMAGE_URI}"
+    local container
+    container="$(docker create "${BETA_IMAGE_URI}")"
+    trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' RETURN
+    docker cp "${container}:/workspace/." "${NATIVE_WORKSPACE}/"
+    docker rm "${container}" >/dev/null
+    trap - RETURN
+}
+
+install_runtime_debs() {
+    if [[ "${INSTALL_RUNTIME_DEBS}" != "1" ]]; then
+        return
+    fi
+    if compgen -G "${NATIVE_WORKSPACE}/runtime_artifacts/*.deb" >/dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y dkms build-essential
+        sudo dpkg -i "${NATIVE_WORKSPACE}"/runtime_artifacts/*.deb
+    fi
+}
+
+create_native_venv() {
+    have_beta_artifacts || extract_beta_artifacts
+    have_beta_artifacts || die "Beta-3 artifacts are incomplete under ${NATIVE_WORKSPACE}"
+    install_runtime_debs
+    command -v python3.12 >/dev/null || {
+        sudo apt-get update
+        sudo apt-get install -y python3.12-venv
+    }
+    python3.12 -m venv "${NATIVE_VENV}"
+    # shellcheck disable=SC1091
+    source "${NATIVE_VENV}/bin/activate"
+    python -m pip install --upgrade pip
+    python -m pip install uv
+    export UV_PROJECT_ENVIRONMENT="${NATIVE_VENV}"
+    uv pip install "${NATIVE_WORKSPACE}"/nki_wheels/nki-0.4.0*-cp312-cp312-linux_x86_64.whl
+    uv pip install "${NATIVE_WORKSPACE}"/neuronx_cc_wheels/neuronx_cc-2.*-cp312-cp312-linux_x86_64.whl
+    cd "${NATIVE_WORKSPACE}/torch_neuron_eager"
+    uv pip install -e ".[dev]"
+    cd "${REPO_ROOT}"
+}
+
+cd "${REPO_ROOT}"
+[[ "$(uname -s)" == "Linux" ]] || die "run this on the Neuron Linux host"
+[[ -f "${NATIVE_VENV}/bin/activate" ]] || create_native_venv
+command -v neuron-ls >/dev/null || die "neuron-ls is unavailable"
 
 # shellcheck disable=SC1091
 source "${NATIVE_VENV}/bin/activate"

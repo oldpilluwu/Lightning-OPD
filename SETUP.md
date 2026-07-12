@@ -176,6 +176,15 @@ NATIVE_VENV=$HOME/workspace/native_venv \
   bash trainium/sft_data_generation_native/setup_env.sh
 ```
 
+If `$HOME/workspace/native_venv` does not exist yet, the native setup script can
+create it from the private Beta-3 DLC artifacts. Either copy/extract the DLC
+`/workspace` directory to `$HOME/workspace` first, or pass the private image URI:
+
+```bash
+BETA_IMAGE_URI=<private-beta-dlc-uri-from-the-Beta-3-guide> \
+  bash trainium/sft_data_generation_native/setup_env.sh
+```
+
 Check the venv names it prints; if your DLAMI uses a different PyTorch
 version (e.g. `aws_neuronx_venv_pytorch_2_8`), pass them explicitly:
 
