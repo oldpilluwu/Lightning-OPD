@@ -43,11 +43,27 @@ EOF
 
     command -v docker >/dev/null || die "docker is required to pull ${BETA_IMAGE_URI}"
     command -v aws >/dev/null || die "aws CLI is required for private ECR login"
+    aws sts get-caller-identity >/dev/null || {
+        cat >&2 <<EOF
+AWS credentials are not configured on this instance.
+
+Use one of:
+  - attach an IAM role to the EC2 instance with ECR pull access, or
+  - run aws configure / aws sso login for a principal that has access to the
+    private Beta-3 DLC repository.
+
+After that, confirm:
+  aws sts get-caller-identity
+EOF
+        exit 1
+    }
     mkdir -p "${NATIVE_WORKSPACE}"
     local registry
     registry="${BETA_IMAGE_URI%%/*}"
-    aws ecr get-login-password --region "${BETA_ECR_REGION}" \
-        | docker login --username AWS --password-stdin "${registry}"
+    local password
+    password="$(aws ecr get-login-password --region "${BETA_ECR_REGION}")"
+    [[ -n "${password}" ]] || die "ECR login password was empty; check IAM/ECR access for ${registry}"
+    printf '%s\n' "${password}" | docker login --username AWS --password-stdin "${registry}"
     docker pull "${BETA_IMAGE_URI}"
     local container
     container="$(docker create "${BETA_IMAGE_URI}")"
