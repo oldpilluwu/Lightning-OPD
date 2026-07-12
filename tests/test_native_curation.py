@@ -42,6 +42,16 @@ class FakeModel(torch.nn.Module):
         return SimpleNamespace(logits=logits)
 
 
+class RecordingCaller:
+    def __init__(self, model, calls):
+        self.model = model
+        self.calls = calls
+
+    def __call__(self, **kwargs):
+        self.calls.append(tuple(kwargs["input_ids"].shape))
+        return self.model(**kwargs)
+
+
 class NativeCurationTests(unittest.TestCase):
     def test_greedy_sampling_uses_fp32_cpu(self):
         logits = torch.tensor([[0.0, 3.0, 1.0]], dtype=torch.bfloat16)
@@ -78,6 +88,28 @@ class NativeCurationTests(unittest.TestCase):
             )
         self.assertEqual(generated, [[2, 3], [2, 3]])
         self.assertEqual(model.calls, [((2, 4), (2, 4)), ((2, 1), (2, 6))])
+
+    def test_static_decode_uses_separate_prefill_and_decode_callers(self):
+        model = FakeModel()
+        prefill_calls = []
+        decode_calls = []
+        object.__setattr__(model, "_native_prefill_model", RecordingCaller(model, prefill_calls))
+        object.__setattr__(model, "_native_decode_model", RecordingCaller(model, decode_calls))
+        with patch("transformers.StaticCache", FakeStaticCache):
+            generate_static(
+                model,
+                torch.tensor([[7, 8]]),
+                torch.tensor([[1, 1]]),
+                max_new_tokens=2,
+                temperature=0.0,
+                top_p=1.0,
+                eos_token_ids={3},
+                pad_token_id=0,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+        self.assertEqual(prefill_calls, [(1, 2)])
+        self.assertEqual(decode_calls, [(1, 1)])
 
 
 if __name__ == "__main__":

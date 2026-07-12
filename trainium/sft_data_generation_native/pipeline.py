@@ -26,6 +26,17 @@ import torch
 import torch.nn.functional as F
 
 
+class ForwardWrapper(torch.nn.Module):
+    """Stable module wrapper used to compile separate prefill and decode graphs."""
+
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, **kwargs: Any) -> Any:
+        return self.model(**kwargs)
+
+
 def import_torchneuron() -> str:
     """Import the package that registers the native ``neuron`` device."""
     configured = os.environ.get("TORCHNEURON_IMPORT")
@@ -136,7 +147,10 @@ def generate_static(
     attention_mask[:, :prefill_len] = prompt_mask.to(torch.long)
     position_ids = (prompt_mask.long().cumsum(-1) - 1).clamp_min(0)
 
-    output = model(
+    prefill_model = getattr(model, "_native_prefill_model", model)
+    decode_model = getattr(model, "_native_decode_model", model)
+
+    output = prefill_model(
         input_ids=input_ids,
         attention_mask=attention_mask[:, :prefill_len],
         position_ids=position_ids,
@@ -162,7 +176,7 @@ def generate_static(
         position = prefill_len + step
         active = (~finished_cpu).to(device=device, dtype=torch.long)
         attention_mask[:, position] = active
-        output = model(
+        output = decode_model(
             input_ids=next_cpu.to(device).unsqueeze(-1),
             attention_mask=attention_mask,
             position_ids=(prompt_lengths + step).unsqueeze(-1),
@@ -195,11 +209,25 @@ def load_model_and_tokenizer(args: argparse.Namespace, device: torch.device) -> 
     print(f"[model] loaded {args.model} on {device} as {dtype} in {time.monotonic() - started:.1f}s")
     if args.mode == "compile":
         print(f"[compile] backend={args.compile_backend} dynamic=False fullgraph={args.fullgraph}")
-        model = torch.compile(
+        object.__setattr__(
             model,
-            backend=args.compile_backend,
-            dynamic=False,
-            fullgraph=args.fullgraph,
+            "_native_prefill_model",
+            torch.compile(
+                ForwardWrapper(model),
+                backend=args.compile_backend,
+                dynamic=False,
+                fullgraph=args.fullgraph,
+            ),
+        )
+        object.__setattr__(
+            model,
+            "_native_decode_model",
+            torch.compile(
+                ForwardWrapper(model),
+                backend=args.compile_backend,
+                dynamic=False,
+                fullgraph=args.fullgraph,
+            ),
         )
     return model, tokenizer, dtype
 
@@ -311,7 +339,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fullgraph", action="store_true")
     parser.add_argument("--allow-cpu-fallback", action="store_true")
     parser.add_argument("--dtype", choices=["bfloat16", "float32"], default="bfloat16")
-    parser.add_argument("--prefill-bucket", type=int, default=512)
+    parser.add_argument("--prefill-bucket", type=int, default=2048)
     parser.add_argument("--max-tokens", type=int, default=16384)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", type=float, default=0.9)
