@@ -8,8 +8,8 @@
 #   bash scripts/curate_qwen3_8b_a100.sh
 #
 # The script does everything needed for SFT data curation:
-#   1. create/reuse a local Python virtualenv
-#   2. install data-curation dependencies
+#   1. create/reuse a local Python 3.12 virtualenv with uv
+#   2. install the latest data-curation dependencies
 #   3. download Qwen3-8B and the prompt dataset from Hugging Face
 #   4. extract prompt-only JSONL
 #   5. generate teacher responses with vLLM
@@ -50,73 +50,65 @@ hf_download() {
     fi
 }
 
-detect_python() {
-    if command_exists python3.10; then
-        echo "python3.10"
-    elif command_exists python3; then
-        echo "python3"
-    elif command_exists python; then
-        echo "python"
+apt_install() {
+    if ! command_exists apt-get; then
+        return 1
+    fi
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+    elif command_exists sudo; then
+        sudo DEBIAN_FRONTEND=noninteractive apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
     else
-        die "Python 3.10+ was not found on PATH."
+        return 1
     fi
 }
 
-python_version_short() {
-    "${PYTHON_BIN}" - <<'PY'
+ensure_uv() {
+    export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+    if command_exists uv; then
+        return 0
+    fi
+
+    log "Installing latest uv"
+    if ! command_exists curl; then
+        apt_install curl ca-certificates || die "curl is required to install uv, and automatic apt install failed."
+    fi
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+    command_exists uv || die "uv installation finished, but 'uv' is not on PATH."
+}
+
+venv_python_version() {
+    local venv_dir="$1"
+    "${venv_dir}/bin/python" - <<'PY'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 }
 
-install_python_venv_package() {
-    if ! command_exists apt-get; then
-        return 1
-    fi
-
-    local py_ver
-    py_ver="$(python_version_short)"
-    local package="python${py_ver}-venv"
-
-    log "Installing ${package} so Python can create virtualenvs"
-    if [[ "$(id -u)" -eq 0 ]]; then
-        DEBIAN_FRONTEND=noninteractive apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y "${package}"
-    elif command_exists sudo; then
-        sudo DEBIAN_FRONTEND=noninteractive apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${package}"
-    else
-        return 1
-    fi
-}
-
-create_virtualenv() {
+create_python312_env() {
     local venv_dir="$1"
 
-    if [[ -f "${venv_dir}/bin/activate" ]]; then
-        return 0
+    ensure_uv
+
+    if [[ -f "${venv_dir}/bin/python" ]]; then
+        local current_version
+        current_version="$(venv_python_version "${venv_dir}" || true)"
+        if [[ "${current_version}" == "${PYTHON_VERSION}" ]]; then
+            return 0
+        fi
+        log "Existing virtualenv uses Python ${current_version}; recreating with Python ${PYTHON_VERSION}"
+        rm -rf "${venv_dir}"
+    elif [[ -d "${venv_dir}" ]]; then
+        log "Removing incomplete virtualenv at ${venv_dir}"
+        rm -rf "${venv_dir}"
     fi
 
-    rm -rf "${venv_dir}"
-    if "${PYTHON_BIN}" -m venv "${venv_dir}"; then
-        return 0
-    fi
-
-    log "Standard venv creation failed; attempting to install the missing system venv package"
-    rm -rf "${venv_dir}"
-    if install_python_venv_package && "${PYTHON_BIN}" -m venv "${venv_dir}"; then
-        return 0
-    fi
-
-    log "System venv package path failed; trying virtualenv via pip"
-    rm -rf "${venv_dir}"
-    if "${PYTHON_BIN}" -m pip --version >/dev/null 2>&1; then
-        "${PYTHON_BIN}" -m pip install --user --upgrade virtualenv
-        "${PYTHON_BIN}" -m virtualenv "${venv_dir}"
-        return 0
-    fi
-
-    die "Could not create a virtualenv. Install python$(python_version_short)-venv, then rerun this script."
+    log "Creating Python ${PYTHON_VERSION} virtualenv with uv"
+    uv venv "${venv_dir}" --python "${PYTHON_VERSION}" --seed --managed-python
 }
 
 detect_gpu_count() {
@@ -150,6 +142,7 @@ RAW_OUTPUT_DIR="${RAW_OUTPUT_DIR:-${ROOT_DIR}/data/sft_data/qwen3_8b_a100_raw}"
 FINAL_PARQUET="${FINAL_PARQUET:-${ROOT_DIR}/data/sft_data/openthoughts3_${NUM_SAMPLES}_qwen3-8b.parquet}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${ROOT_DIR}/data/.pipeline_state/qwen3_8b_a100}"
 VENV_DIR="${VENV_DIR:-${ROOT_DIR}/.venv-curation}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 
 # vLLM defaults tuned for Qwen3-8B on an A100 80GB. Lower BATCH_SIZE or
 # GPU_MEMORY_UTILIZATION if the local driver/runtime leaves less free memory.
@@ -168,13 +161,13 @@ TOP_P="${TOP_P:-0.9}"
 NUM_RESPONSES="${NUM_RESPONSES:-1}"
 
 FORCE="${FORCE:-0}"
-FORCE_REINSTALL="${FORCE_REINSTALL:-0}"
 CLEAN_RAW="${CLEAN_RAW:-0}"
 
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-LAZY}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-auto}"
 
 if (( NUM_GPUS < TP_SIZE )); then
     die "NUM_GPUS (${NUM_GPUS}) must be >= TP_SIZE (${TP_SIZE})."
@@ -188,35 +181,30 @@ require_gpu
 log "GPU inventory"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv
 
-PYTHON_BIN="$(detect_python)"
-log "Setting up virtualenv at ${VENV_DIR}"
-create_virtualenv "${VENV_DIR}"
+log "Setting up Python ${PYTHON_VERSION} virtualenv at ${VENV_DIR}"
+create_python312_env "${VENV_DIR}"
 # shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
 
 python - <<'PY'
 import sys
-if sys.version_info < (3, 10):
-    raise SystemExit("Python 3.10+ is required.")
+if sys.version_info[:2] != (3, 12):
+    raise SystemExit(f"Python 3.12 is required, got {sys.version.split()[0]}")
 print(f"Using Python {sys.version.split()[0]}")
 PY
 
-DEPS_MARKER="${VENV_DIR}/.curation-deps-installed"
-if [[ "${FORCE_REINSTALL}" == "1" || ! -f "${DEPS_MARKER}" ]]; then
-    log "Installing curation dependencies"
-    python -m pip install --upgrade pip setuptools wheel
-    python -m pip install --upgrade \
-        "vllm" \
-        "transformers" \
-        "datasets" \
-        "huggingface_hub[hf_transfer]" \
-        "pyarrow" \
-        "pandas" \
-        "tqdm"
-    date '+%Y-%m-%d %H:%M:%S' > "${DEPS_MARKER}"
-else
-    log "Dependencies already installed; set FORCE_REINSTALL=1 to reinstall"
-fi
+log "Installing/upgrading latest curation dependencies"
+uv pip install --upgrade --torch-backend="${UV_TORCH_BACKEND}" \
+    "pip" \
+    "setuptools" \
+    "wheel" \
+    "vllm" \
+    "transformers" \
+    "datasets" \
+    "huggingface_hub[hf_transfer]" \
+    "pyarrow" \
+    "pandas" \
+    "tqdm"
 
 mkdir -p "$(dirname "${PROMPTS_FILE}")" "${RAW_OUTPUT_DIR}" "$(dirname "${FINAL_PARQUET}")" "${CHECKPOINT_DIR}" "${MODEL_DIR}"
 
