@@ -99,11 +99,27 @@ def run_curation(args: argparse.Namespace) -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────
     print(f"{tag} Loading model: {args.model} (tp={args.tensor_parallel_size})")
-    llm = LLM(
-        model=args.model,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=True,
-    )
+    llm_kwargs = {
+        "model": args.model,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "trust_remote_code": True,
+        "dtype": args.dtype,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "swap_space": args.swap_space,
+        "enforce_eager": args.enforce_eager,
+    }
+    if args.max_model_len is not None:
+        llm_kwargs["max_model_len"] = args.max_model_len
+    if args.max_num_seqs is not None:
+        llm_kwargs["max_num_seqs"] = args.max_num_seqs
+    if args.max_num_batched_tokens is not None:
+        llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    if args.download_dir is not None:
+        llm_kwargs["download_dir"] = args.download_dir
+    if args.enable_prefix_caching:
+        llm_kwargs["enable_prefix_caching"] = True
+
+    llm = LLM(**llm_kwargs)
 
     sampling_params = SamplingParams(
         temperature=args.temperature,
@@ -188,6 +204,26 @@ def parse_args() -> argparse.Namespace:
                    help="Number of responses per prompt (default: 1).")
     p.add_argument("--batch-size", type=int, default=32,
                    help="Prompts per vLLM batch call (default: 32).")
+
+    # vLLM engine tuning
+    p.add_argument("--dtype", type=str, default="auto",
+                   help="vLLM model dtype, e.g. auto, bfloat16, float16 (default: auto).")
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.9,
+                   help="Fraction of GPU memory reserved for vLLM KV cache (default: 0.9).")
+    p.add_argument("--max-model-len", type=int, default=None,
+                   help="Override vLLM max model length.")
+    p.add_argument("--max-num-seqs", type=int, default=None,
+                   help="Maximum number of concurrent sequences scheduled by vLLM.")
+    p.add_argument("--max-num-batched-tokens", type=int, default=None,
+                   help="Maximum total tokens batched by vLLM scheduler.")
+    p.add_argument("--swap-space", type=int, default=4,
+                   help="CPU swap space per GPU in GiB for vLLM (default: 4).")
+    p.add_argument("--download-dir", type=str, default=None,
+                   help="Optional model download/cache directory passed to vLLM.")
+    p.add_argument("--enable-prefix-caching", action="store_true",
+                   help="Enable vLLM prefix caching.")
+    p.add_argument("--enforce-eager", action="store_true",
+                   help="Disable CUDA graph capture and run vLLM in eager mode.")
 
     # Parallelism
     p.add_argument("--tensor-parallel-size", type=int, default=1,

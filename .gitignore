@@ -21,6 +21,8 @@ build/
 # Project-specific
 data/
 checkpoints/
+models/
+.venv-curation/
 *.arrow
 *.sqsh
 *.parquet
