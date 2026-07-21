@@ -168,6 +168,10 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export CUDA_MODULE_LOADING="${CUDA_MODULE_LOADING:-LAZY}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-auto}"
+# The latest vLLM defaults dense models to Model Runner V2, which can fail on
+# some CUDA/driver setups during UVA buffer initialization. Keep latest vLLM,
+# but use the mature runner by default for this unattended batch curation job.
+export VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-0}"
 
 if (( NUM_GPUS < TP_SIZE )); then
     die "NUM_GPUS (${NUM_GPUS}) must be >= TP_SIZE (${TP_SIZE})."
