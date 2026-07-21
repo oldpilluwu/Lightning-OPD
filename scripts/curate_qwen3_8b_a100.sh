@@ -62,6 +62,63 @@ detect_python() {
     fi
 }
 
+python_version_short() {
+    "${PYTHON_BIN}" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+}
+
+install_python_venv_package() {
+    if ! command_exists apt-get; then
+        return 1
+    fi
+
+    local py_ver
+    py_ver="$(python_version_short)"
+    local package="python${py_ver}-venv"
+
+    log "Installing ${package} so Python can create virtualenvs"
+    if [[ "$(id -u)" -eq 0 ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${package}"
+    elif command_exists sudo; then
+        sudo DEBIAN_FRONTEND=noninteractive apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${package}"
+    else
+        return 1
+    fi
+}
+
+create_virtualenv() {
+    local venv_dir="$1"
+
+    if [[ -f "${venv_dir}/bin/activate" ]]; then
+        return 0
+    fi
+
+    rm -rf "${venv_dir}"
+    if "${PYTHON_BIN}" -m venv "${venv_dir}"; then
+        return 0
+    fi
+
+    log "Standard venv creation failed; attempting to install the missing system venv package"
+    rm -rf "${venv_dir}"
+    if install_python_venv_package && "${PYTHON_BIN}" -m venv "${venv_dir}"; then
+        return 0
+    fi
+
+    log "System venv package path failed; trying virtualenv via pip"
+    rm -rf "${venv_dir}"
+    if "${PYTHON_BIN}" -m pip --version >/dev/null 2>&1; then
+        "${PYTHON_BIN}" -m pip install --user --upgrade virtualenv
+        "${PYTHON_BIN}" -m virtualenv "${venv_dir}"
+        return 0
+    fi
+
+    die "Could not create a virtualenv. Install python$(python_version_short)-venv, then rerun this script."
+}
+
 detect_gpu_count() {
     if command_exists nvidia-smi; then
         local count
@@ -133,9 +190,7 @@ nvidia-smi --query-gpu=index,name,memory.total,memory.free --format=csv
 
 PYTHON_BIN="$(detect_python)"
 log "Setting up virtualenv at ${VENV_DIR}"
-if [[ ! -d "${VENV_DIR}" ]]; then
-    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
-fi
+create_virtualenv "${VENV_DIR}"
 # shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
 
