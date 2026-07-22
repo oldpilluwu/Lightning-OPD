@@ -122,6 +122,16 @@ def run_curation(args: argparse.Namespace) -> None:
         llm_kwargs["num_gpu_blocks_override"] = args.num_gpu_blocks_override
     if args.download_dir is not None:
         llm_kwargs["download_dir"] = args.download_dir
+    if args.additional_config_json is not None:
+        try:
+            additional_config = json.loads(args.additional_config_json)
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                f"--additional-config-json is not valid JSON: {error}"
+            ) from error
+        if not isinstance(additional_config, dict):
+            raise SystemExit("--additional-config-json must decode to an object")
+        llm_kwargs["additional_config"] = additional_config
     llm = LLM(**llm_kwargs)
 
     sampling_params = SamplingParams(
@@ -233,6 +243,8 @@ def parse_args() -> argparse.Namespace:
                    help="Optional model download/cache directory passed to vLLM.")
     p.add_argument("--enable-prefix-caching", action="store_true",
                    help="Enable vLLM prefix caching.")
+    p.add_argument("--additional-config-json", type=str, default=None,
+                   help="JSON object passed to vLLM as additional_config.")
 
     # Parallelism
     p.add_argument("--tensor-parallel-size", type=int, default=1,
