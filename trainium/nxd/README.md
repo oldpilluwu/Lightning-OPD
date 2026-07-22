@@ -40,8 +40,8 @@ the standard locations detected by `setup_env.sh`.
 ## One-chip smoke test
 
 Use `trn2.3xlarge` to compile Qwen3-8B and generate eight real OpenThoughts3
-responses before starting the full run. The smoke test streams only the rows it
-needs, downloads the model to a reusable local path, retains the production
+responses before starting the full run. The smoke test fetches only the rows it
+needs through the Hugging Face Dataset Viewer, downloads the model to a reusable local path, retains the production
 18,432-token compiled sequence length, and writes a JSON throughput report.
 
 Start with the memory-safe TP=4 layout:

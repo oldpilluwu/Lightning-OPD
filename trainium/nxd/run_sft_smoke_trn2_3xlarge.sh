@@ -172,30 +172,63 @@ if [[ -f "${PROMPT_FILE}" ]] && validate_prompts; then
     echo ">>> Reusing smoke prompts."
 else
     PROMPT_TMP="${PROMPT_FILE}.tmp.$$"
-    echo ">>> Streaming ${SMOKE_SAMPLES} valid prompts from ${HF_DATASET}."
-    python - "${HF_DATASET}" "${SMOKE_SAMPLES}" "${PROMPT_TMP}" <<'PY'
+    echo ">>> Fetching ${SMOKE_SAMPLES} valid prompts from the Hugging Face Dataset Viewer."
+    if ! python - "${HF_DATASET}" "${SMOKE_SAMPLES}" "${PROMPT_TMP}" <<'PY'
 import json
+import os
 import sys
+import urllib.parse
+import urllib.request
 
-from datasets import load_dataset
 from scripts.prepare_sft_prompts import extract_prompt
 
 dataset_name, count, output = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-dataset = load_dataset(dataset_name, split="train", streaming=True)
+base_url = "https://datasets-server.huggingface.co/rows"
+offset = 0
 written = 0
+headers = {"User-Agent": "Lightning-OPD-Neuron-smoke/1.0"}
+if token := os.environ.get("HF_TOKEN"):
+    headers["Authorization"] = f"Bearer {token}"
+
 with open(output, "w", encoding="utf-8") as handle:
-    for sample in dataset:
-        row = extract_prompt(sample)
-        if row is None or not row["prompt"]:
-            continue
-        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        written += 1
-        if written == count:
+    while written < count:
+        query = urllib.parse.urlencode(
+            {
+                "dataset": dataset_name,
+                "config": "default",
+                "split": "train",
+                "offset": offset,
+                "length": min(100, max(count - written, 10)),
+            }
+        )
+        request = urllib.request.Request(f"{base_url}?{query}", headers=headers)
+        with urllib.request.urlopen(request, timeout=120) as response:
+            payload = json.load(response)
+
+        page = payload.get("rows", [])
+        if not page:
             break
+        for envelope in page:
+            row = extract_prompt(envelope["row"])
+            if row is None or not row["prompt"]:
+                continue
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            written += 1
+            if written == count:
+                break
+        offset += len(page)
+        total = payload.get("num_rows_total")
+        if total is not None and offset >= total:
+            break
+
 if written != count:
     raise SystemExit(f"Only found {written} valid prompts; expected {count}")
-print(f"Streamed {written} prompts")
+print(f"Fetched {written} prompts")
 PY
+    then
+        rm -f "${PROMPT_TMP}"
+        exit 1
+    fi
     mv "${PROMPT_TMP}" "${PROMPT_FILE}"
     validate_prompts
 fi
