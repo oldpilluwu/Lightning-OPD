@@ -401,9 +401,14 @@ PIPELINE_ARGS=(
 )
 
 CORE_END=$(( TP_SIZE - 1 ))
+# Direct vLLM-Neuron owns one worker process per TP rank. The parent process
+# must expose the whole TP slice with NEURON_VISIBLE_DEVICES; each worker then
+# sets its own NEURON_RT_VISIBLE_CORES value internally. Remove any legacy
+# value inherited from an NxD/native shell before vLLM forks its workers.
+unset NEURON_RT_VISIBLE_CORES
 echo ">>> Preparing/compiling the beta engine on logical cores 0-${CORE_END}."
 PREPARE_START="$(date +%s)"
-NEURON_RT_VISIBLE_CORES="0-${CORE_END}" \
+NEURON_VISIBLE_DEVICES="0-${CORE_END}" \
     python data_curation/pipeline.py \
         "${PIPELINE_ARGS[@]}" \
         --output-dir "${PRECOMPILE_OUTPUT}" \
@@ -415,7 +420,7 @@ PREPARE_SECONDS=$(( $(date +%s) - PREPARE_START ))
 
 echo ">>> Generating ${SMOKE_SAMPLES} paper-configured responses."
 GENERATION_START="$(date +%s)"
-NEURON_RT_VISIBLE_CORES="0-${CORE_END}" \
+NEURON_VISIBLE_DEVICES="0-${CORE_END}" \
     python data_curation/pipeline.py \
         "${PIPELINE_ARGS[@]}" \
         --rank 0 \
