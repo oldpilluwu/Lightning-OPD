@@ -478,6 +478,11 @@ if any(count <= 0 for count in tokens):
     raise SystemExit(f"{parquet_path}: one or more completions are empty")
 
 generation_seconds = int(generation_seconds)
+generation_time_hms = (
+    f"{generation_seconds // 3600:02d}:"
+    f"{(generation_seconds % 3600) // 60:02d}:"
+    f"{generation_seconds % 60:02d}"
+)
 report = {
     "backend": "vllm-neuron-direct-beta",
     "instance_type": instance_type,
@@ -497,6 +502,7 @@ report = {
     "thinking": True,
     "engine_prepare_seconds": int(prepare_seconds),
     "generation_seconds": generation_seconds,
+    "generation_time_hms": generation_time_hms,
     "generated_tokens_per_second": sum(tokens) / max(generation_seconds, 1),
     "parquet": parquet_path,
 }
@@ -511,5 +517,10 @@ PY
 
 echo
 echo "Direct-beta smoke test passed."
+printf 'Total generation time: %02d:%02d:%02d (%d seconds)\n' \
+    $(( GENERATION_SECONDS / 3600 )) \
+    $(( (GENERATION_SECONDS % 3600) / 60 )) \
+    $(( GENERATION_SECONDS % 60 )) \
+    "${GENERATION_SECONDS}"
 echo "Result: ${FINAL_PARQUET}"
 echo "Report: ${REPORT_FILE}"
