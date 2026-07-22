@@ -99,11 +99,29 @@ def run_curation(args: argparse.Namespace) -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────
     print(f"{tag} Loading model: {args.model} (tp={args.tensor_parallel_size})")
-    llm = LLM(
-        model=args.model,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=True,
-    )
+    llm_kwargs = {
+        "model": args.model,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "trust_remote_code": True,
+    }
+    if args.dtype is not None:
+        llm_kwargs["dtype"] = args.dtype
+    if args.max_model_len is not None:
+        llm_kwargs["max_model_len"] = args.max_model_len
+    if args.max_num_seqs is not None:
+        llm_kwargs["max_num_seqs"] = args.max_num_seqs
+    if args.max_num_batched_tokens is not None:
+        llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    if args.block_size is not None:
+        llm_kwargs["block_size"] = args.block_size
+    if args.num_gpu_blocks_override is not None:
+        llm_kwargs["num_gpu_blocks_override"] = args.num_gpu_blocks_override
+    if args.download_dir is not None:
+        llm_kwargs["download_dir"] = args.download_dir
+    if args.enable_prefix_caching:
+        llm_kwargs["enable_prefix_caching"] = True
+
+    llm = LLM(**llm_kwargs)
 
     sampling_params = SamplingParams(
         temperature=args.temperature,
@@ -128,7 +146,10 @@ def run_curation(args: argparse.Namespace) -> None:
         print(f"{tag} Batch {batch_idx + 1}/{total_batches} "
               f"({batch_end - batch_start} samples) ...")
 
-        outputs = llm.chat(prompts, sampling_params)
+        chat_kwargs = {}
+        if args.enable_thinking:
+            chat_kwargs["chat_template_kwargs"] = {"enable_thinking": True}
+        outputs = llm.chat(prompts, sampling_params, **chat_kwargs)
 
         # Build results
         rows = []
@@ -158,6 +179,7 @@ def run_curation(args: argparse.Namespace) -> None:
     # ── Cleanup ───────────────────────────────────────────────────────────
     if ckpt_file.exists():
         ckpt_file.unlink()
+    (output_dir / "_SUCCESS").touch()
     print(f"{tag} Done! {total_saved} samples → {output_dir}/")
 
 
@@ -188,6 +210,28 @@ def parse_args() -> argparse.Namespace:
                    help="Number of responses per prompt (default: 1).")
     p.add_argument("--batch-size", type=int, default=32,
                    help="Prompts per vLLM batch call (default: 32).")
+    p.add_argument("--enable-thinking", action="store_true",
+                   help="Explicitly enable thinking in supported chat templates.")
+
+    # vLLM engine tuning. These are optional so existing GPU launchers retain
+    # vLLM defaults while accelerator-specific launchers can compile fixed
+    # shapes and size their scheduler correctly.
+    p.add_argument("--dtype", type=str, default=None,
+                   help="Model dtype passed to vLLM (for example, bfloat16).")
+    p.add_argument("--max-model-len", type=int, default=None,
+                   help="Maximum prompt plus generated sequence length.")
+    p.add_argument("--max-num-seqs", type=int, default=None,
+                   help="Maximum number of sequences scheduled concurrently.")
+    p.add_argument("--max-num-batched-tokens", type=int, default=None,
+                   help="Maximum tokens scheduled in one iteration.")
+    p.add_argument("--block-size", type=int, default=None,
+                   help="KV-cache block size passed to vLLM.")
+    p.add_argument("--num-gpu-blocks-override", type=int, default=None,
+                   help="Override vLLM's KV-cache block count (required by NxDI).")
+    p.add_argument("--download-dir", type=str, default=None,
+                   help="Optional model download/cache directory passed to vLLM.")
+    p.add_argument("--enable-prefix-caching", action="store_true",
+                   help="Enable vLLM prefix caching.")
 
     # Parallelism
     p.add_argument("--tensor-parallel-size", type=int, default=1,
