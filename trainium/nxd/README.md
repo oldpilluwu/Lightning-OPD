@@ -58,8 +58,13 @@ TP_SIZE=2 bash trainium/nxd/run_sft_smoke_trn2_3xlarge.sh
 
 The TP=4 run uses one replica with eight sequence slots. The TP=2 run uses two
 replicas with four slots each, so both configurations expose eight total slots
-per chip. Compare `generated_tokens_per_second` in the two `benchmark.json`
-files. A run is suitable for scaling only if it compiles, completes all eight
+per chip. Compare `generation_seconds`, `generation_duration`, and
+`generated_tokens_per_second` in the two `benchmark.json` files. Generation
+wall time starts immediately before the worker processes launch and ends after
+all workers finish, so TP=2 measures both replicas concurrently rather than
+adding their individual runtimes. `total_run_seconds` also includes environment
+setup, downloads, compilation, and output merging. A run is suitable for
+scaling only if it compiles, completes all eight
 long-context prompts without a Neuron out-of-memory/runtime error, and produces
 a valid eight-row parquet. Each successful smoke run prints the matching
 `trn2.48xlarge` command.

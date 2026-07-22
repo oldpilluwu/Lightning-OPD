@@ -9,6 +9,16 @@
 
 set -euo pipefail
 
+SCRIPT_START="$(date +%s)"
+
+format_duration() {
+    local total_seconds="$1"
+    printf '%02d:%02d:%02d' \
+        "$(( total_seconds / 3600 ))" \
+        "$(( (total_seconds % 3600) / 60 ))" \
+        "$(( total_seconds % 60 ))"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
@@ -281,6 +291,7 @@ else
     touch "${PRECOMPILE_MARKER}"
 fi
 COMPILE_SECONDS=$(( $(date +%s) - COMPILE_START ))
+echo ">>> Compilation stage: $(format_duration "${COMPILE_SECONDS}") (${COMPILE_SECONDS}s; cache_reused=${COMPILE_CACHE_REUSED})."
 
 PIDS=()
 cleanup_workers() {
@@ -326,6 +337,7 @@ done
 set -e
 trap - INT TERM
 GENERATION_SECONDS=$(( $(date +%s) - GENERATION_START ))
+echo ">>> TP=${TP_SIZE} generation wall time: $(format_duration "${GENERATION_SECONDS}") (${GENERATION_SECONDS}s)."
 
 for (( rank=0; rank<NUM_WORKERS; rank++ )); do
     if (( NUM_WORKERS == 1 )); then
@@ -345,11 +357,13 @@ python data_curation/merge.py \
     --output "${FINAL_PARQUET}" \
     --max-tokens "${MAX_TOKENS}"
 
+TOTAL_SECONDS=$(( $(date +%s) - SCRIPT_START ))
+
 python - \
     "${FINAL_PARQUET}" "${REPORT_FILE}" "${INSTANCE_TYPE:-unknown}" \
     "${TP_SIZE}" "${NUM_WORKERS}" "${MAX_NUM_SEQS}" "${SMOKE_SAMPLES}" \
     "${MAX_TOKENS}" "${MAX_MODEL_LEN}" "${COMPILE_SECONDS}" \
-    "${GENERATION_SECONDS}" "${COMPILE_CACHE_REUSED}" <<'PY'
+    "${GENERATION_SECONDS}" "${COMPILE_CACHE_REUSED}" "${TOTAL_SECONDS}" <<'PY'
 import json
 import sys
 
@@ -368,6 +382,7 @@ import pyarrow.parquet as pq
     compile_seconds,
     generation_seconds,
     compile_cache_reused,
+    total_seconds,
 ) = sys.argv[1:]
 
 table = pq.read_table(parquet_path, columns=["tokens"])
@@ -377,6 +392,16 @@ if len(tokens) != expected_rows:
     raise SystemExit(f"{parquet_path}: found {len(tokens)} rows, expected {expected_rows}")
 
 generation_seconds = int(generation_seconds)
+compile_seconds = int(compile_seconds)
+total_seconds = int(total_seconds)
+
+
+def duration(seconds: int) -> str:
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 report = {
     "instance_type": instance_type,
     "tensor_parallel_size": int(tp_size),
@@ -388,9 +413,14 @@ report = {
     "max_tokens": int(max_tokens),
     "max_model_len": int(max_model_len),
     "compile_cache_reused": bool(int(compile_cache_reused)),
-    "compile_seconds": int(compile_seconds),
+    "compile_seconds": compile_seconds,
+    "compile_duration": duration(compile_seconds),
     "generation_seconds": generation_seconds,
+    "generation_duration": duration(generation_seconds),
     "generated_tokens_per_second": sum(tokens) / max(generation_seconds, 1),
+    "samples_per_second": len(tokens) / max(generation_seconds, 1),
+    "total_run_seconds": total_seconds,
+    "total_run_duration": duration(total_seconds),
     "parquet": parquet_path,
 }
 with open(report_path, "w", encoding="utf-8") as handle:
@@ -405,6 +435,8 @@ PY
 PRODUCTION_WORKERS=$(( NUM_WORKERS * 16 ))
 echo
 echo "Smoke test passed. Result: ${REPORT_FILE}"
+echo "TP=${TP_SIZE} generation: $(format_duration "${GENERATION_SECONDS}") (${GENERATION_SECONDS}s wall clock)"
+echo "Complete smoke run:       $(format_duration "${TOTAL_SECONDS}") (${TOTAL_SECONDS}s wall clock)"
 echo "Equivalent trn2.48xlarge topology command:"
 echo "TP_SIZE=${TP_SIZE} NUM_WORKERS=${PRODUCTION_WORKERS} MAX_NUM_SEQS=${MAX_NUM_SEQS} BATCH_SIZE=${BATCH_SIZE} \\"
 echo "  bash trainium/nxd/run_sft_curation_trn2_48xlarge.sh"
