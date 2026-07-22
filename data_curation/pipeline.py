@@ -103,6 +103,10 @@ def run_curation(args: argparse.Namespace) -> None:
         "model": args.model,
         "tensor_parallel_size": args.tensor_parallel_size,
         "trust_remote_code": True,
+        # vLLM V1 may default prefix caching to enabled. Pass the requested
+        # state explicitly because NxDI requires block KV-cache settings when
+        # it is enabled; the default curation path uses contiguous KV cache.
+        "enable_prefix_caching": args.enable_prefix_caching,
     }
     if args.dtype is not None:
         llm_kwargs["dtype"] = args.dtype
@@ -118,9 +122,6 @@ def run_curation(args: argparse.Namespace) -> None:
         llm_kwargs["num_gpu_blocks_override"] = args.num_gpu_blocks_override
     if args.download_dir is not None:
         llm_kwargs["download_dir"] = args.download_dir
-    if args.enable_prefix_caching:
-        llm_kwargs["enable_prefix_caching"] = True
-
     llm = LLM(**llm_kwargs)
 
     sampling_params = SamplingParams(
