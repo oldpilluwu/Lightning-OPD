@@ -21,10 +21,12 @@ Usage:
 """
 
 import argparse
+import os
 from pathlib import Path
 
-import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.ipc as ipc
+import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
@@ -52,35 +54,50 @@ def merge_arrow_files(input_dir: str, output: str, max_tokens: int | None = None
     arrow_files = sorted(input_path.rglob("*.arrow"))
 
     if not arrow_files:
-        print(f"No Arrow files found in {input_dir}")
-        return
+        raise FileNotFoundError(f"No Arrow files found in {input_dir}")
 
     print(f"Found {len(arrow_files)} Arrow files in {input_dir}")
 
-    tables = []
-    total_rows = 0
-    for f in tqdm(arrow_files, desc="Reading Arrow files"):
-        with pa.OSFile(str(f), "rb") as source:
-            table = ipc.open_file(source).read_all()
-            tables.append(table)
-            total_rows += len(table)
-
-    merged = pa.concat_tables(tables)
-    print(f"Total rows before filtering: {total_rows}")
-
-    if max_tokens is not None and "tokens" in merged.column_names:
-        tokens = merged.column("tokens").to_pylist()
-        mask = [t <= max_tokens for t in tokens]
-        merged = merged.filter(mask)
-        filtered = total_rows - len(merged)
-        print(f"Filtered {filtered} rows with tokens > {max_tokens}")
-
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    df = merged.to_pandas()
-    df.to_parquet(output, index=False)
+    temporary_path = output_path.with_name(f".{output_path.name}.tmp.{os.getpid()}")
+    writer = None
+    schema = None
+    total_rows = 0
+    written_rows = 0
+    try:
+        for arrow_file in tqdm(arrow_files, desc="Merging Arrow files"):
+            with arrow_file.open("rb") as source:
+                table = ipc.open_file(source).read_all()
+            total_rows += len(table)
 
-    print(f"Merged {len(df)} rows -> {output}")
+            if max_tokens is not None and "tokens" in table.column_names:
+                table = table.filter(pc.less_equal(table["tokens"], max_tokens))
+
+            if schema is None:
+                schema = table.schema
+                writer = pq.ParquetWriter(temporary_path, schema, compression="snappy")
+            elif table.schema != schema:
+                raise ValueError(f"{arrow_file}: schema does not match earlier shards")
+
+            writer.write_table(table)
+            written_rows += len(table)
+
+        assert writer is not None
+        writer.close()
+        writer = None
+        os.replace(temporary_path, output_path)
+    except BaseException:
+        if writer is not None:
+            writer.close()
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+    filtered = total_rows - written_rows
+    print(f"Total rows before filtering: {total_rows}")
+    if max_tokens is not None:
+        print(f"Filtered {filtered} rows with tokens > {max_tokens}")
+    print(f"Merged {written_rows} rows -> {output}")
 
 
 if __name__ == "__main__":
