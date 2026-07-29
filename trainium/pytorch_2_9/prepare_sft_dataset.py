@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-tokenize Lightning-OPD SFT data exactly like LLaMA-Factory."""
+"""Pre-tokenize Lightning-OPD SFT data for the direct PyTorch 2.9 trainer."""
 
 from __future__ import annotations
 
@@ -109,7 +109,8 @@ def main() -> None:
         batch_size=args.preprocessing_batch_size,
         num_proc=args.preprocessing_num_workers,
         remove_columns=source.column_names,
-        load_from_cache_file=not args.overwrite,
+        # The original YAML sets overwrite_cache: true.
+        load_from_cache_file=False,
         features=features,
         desc="LLaMA-Factory-compatible Qwen3 SFT preprocessing",
     )
@@ -135,6 +136,7 @@ def main() -> None:
         "train_on_prompt": False,
         "mask_history": False,
         "enable_thinking": True,
+        "overwrite_cache": True,
         "preprocessing_num_workers": args.preprocessing_num_workers,
         "preprocessing_batch_size": args.preprocessing_batch_size,
     }

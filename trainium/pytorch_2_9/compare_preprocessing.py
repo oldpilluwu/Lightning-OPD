@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Byte-for-byte comparison with a checked-out LLaMA-Factory processor."""
+"""Compare direct PyTorch preprocessing with checked-out LLaMA-Factory."""
 
 from __future__ import annotations
 
