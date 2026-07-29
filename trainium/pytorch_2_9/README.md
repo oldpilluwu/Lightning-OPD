@@ -24,7 +24,9 @@ The production run preserves the original LLaMA-Factory SFT contract:
 - Cosine schedule, warmup ratio `0.1`
 - 3,000 optimizer steps
 - BF16, stochastic rounding disabled
-- FP32 optimizer master weights and FP32 gradient accumulation
+- ZeRO-0 optimizer state, with NxD-only FP32 master-weight and FP32
+  gradient-accumulation modes disabled (NxD 0.19 supports those modes only
+  with ZeRO-1)
 - Sequence parallelism enabled (matching `disable_sequence_parallel: false`)
 - Gradient checkpointing disabled
 - Save every 100 steps and keep 10

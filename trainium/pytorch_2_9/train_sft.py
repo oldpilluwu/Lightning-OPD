@@ -253,8 +253,11 @@ def main() -> None:
         # Match the original LLaMA-Factory run: gradient checkpointing disabled.
         activation_checkpoint_config=None,
         mixed_precision_config={
-            "use_master_weights": True,
-            "use_fp32_grad_acc": True,
+            # NxD 0.19 only supports these FP32 optimizer features with
+            # ZeRO-1. Keep them disabled to reproduce the source run's
+            # explicit ZeRO-0 configuration.
+            "use_master_weights": False,
+            "use_fp32_grad_acc": False,
             "use_master_weights_in_ckpt": False,
         },
     )
