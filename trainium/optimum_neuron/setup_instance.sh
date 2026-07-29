@@ -23,6 +23,12 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
     done
 fi
 
+if [[ -z "${PYTHON_BIN:-}" ]] && command -v uv >/dev/null 2>&1; then
+    echo "No system Python 3.10/3.11 found; installing UV-managed Python 3.11."
+    uv python install 3.11
+    PYTHON_BIN="$(uv python find 3.11)"
+fi
+
 if ! command -v neuron-ls >/dev/null 2>&1; then
     echo "ERROR: neuron-ls is unavailable." >&2
     echo "Use an AWS Neuron PyTorch DLAMI on the trn2.48xlarge instance." >&2
@@ -34,7 +40,7 @@ if ! neuron-ls >/dev/null; then
 fi
 if [[ -z "${PYTHON_BIN:-}" ]]; then
     echo "ERROR: Python 3.10 or 3.11 is required by the pinned Optimum Neuron stack." >&2
-    echo "Set PYTHON_BIN=/path/to/python3.10 if it is installed in a nonstandard location." >&2
+    echo "Install uv, or set PYTHON_BIN to a Python 3.10/3.11 executable." >&2
     exit 1
 fi
 
