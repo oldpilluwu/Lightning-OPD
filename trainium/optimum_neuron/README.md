@@ -147,6 +147,11 @@ lines used by AWS PyTorch 2.9 releases—including `0.19.28492`—and refuses to
 install or upgrade a missing Neuron binary package. The runtime device count
 should be 64 on a `trn2.48xlarge` using the default LNC=2 configuration.
 
+The setup keeps NumPy on the 2.x line required by the current DLAMI SciPy
+build and force-reinstalls only the pinned pure-Python Transformers package.
+This repairs stale or mixed Transformers files without reinstalling Torch,
+Torch-XLA, Torch-NeuronX, NxD, libneuronxla, or neuronx-cc.
+
 ## Dataset layout used by this project
 
 Data generation and training both ran on one `trn2.48xlarge`. The generated

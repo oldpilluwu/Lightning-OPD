@@ -93,6 +93,13 @@ printf '%s\n' "${NEURON_STACK_BEFORE}"
 
 "${PYTHON_BIN}" -m pip install \
     -r "${SCRIPT_DIR}/requirements.txt"
+# A DLAMI can contain a Transformers dist-info version that matches our pin
+# while stale package files remain from an image update. Reinstall only this
+# pure-Python package; never force-reinstall the AWS Neuron binary bundle.
+"${PYTHON_BIN}" -m pip install \
+    --force-reinstall \
+    --no-deps \
+    "transformers==4.57.1"
 "${PYTHON_BIN}" -m pip check
 
 NEURON_STACK_AFTER="$("${PYTHON_BIN}" - <<'PY'
@@ -138,8 +145,11 @@ import torch
 import torch_neuronx
 import torch_xla
 import torch_xla.runtime as xr
+import numpy
 import optimum.neuron
 import neuronx_distributed
+from transformers import AutoTokenizer
+from transformers.generation import GenerationMixin
 from optimum.neuron import NeuronTrainer, NeuronTrainingArguments
 from optimum.neuron.models.training import NeuronModelForCausalLM
 
@@ -169,6 +179,10 @@ print("torch-neuronx:", torch_neuronx.__version__)
 print("torch-neuronx path:", module_path)
 print("torch-xla:", version("torch-xla"))
 print("neuronx-distributed:", version("neuronx-distributed"))
+print("numpy:", numpy.__version__)
+print("transformers:", version("transformers"))
+print("AutoTokenizer:", AutoTokenizer)
+print("GenerationMixin:", GenerationMixin)
 print("XLA device:", torch_xla.device())
 print("PJRT device type:", xr.device_type())
 device_count = xr.global_runtime_device_count()
