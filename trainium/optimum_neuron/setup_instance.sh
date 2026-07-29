@@ -56,7 +56,6 @@ required = {
     "torch": (2, 9),
     "torch-xla": (2, 9),
     "torch-neuronx": (2, 9),
-    "neuronx-distributed": (0, 18),
 }
 bundle = [
     "torch",
@@ -79,6 +78,13 @@ for package, expected in required.items():
         raise SystemExit(
             f"{package} {actual} is incompatible with the audited PyTorch 2.9 stack"
         )
+nxd_version = Version(versions["neuronx-distributed"])
+if not (Version("0.18") <= nxd_version < Version("0.20")):
+    raise SystemExit(
+        "neuronx-distributed "
+        f"{versions['neuronx-distributed']} is outside the supported "
+        "PyTorch 2.9 DLAMI range (0.18.x or 0.19.x)"
+    )
 for package in bundle:
     print(f"{package}=={versions[package]}")
 PY

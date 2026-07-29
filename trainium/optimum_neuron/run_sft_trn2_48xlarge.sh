@@ -94,7 +94,6 @@ required_versions = {
     "torch": (2, 9),
     "torch-xla": (2, 9),
     "torch-neuronx": (2, 9),
-    "neuronx-distributed": (0, 18),
 }
 for package, expected_version in required_versions.items():
     try:
@@ -105,6 +104,12 @@ for package, expected_version in required_versions.items():
         raise SystemExit(
             f"{package} {actual} is active; training requires aws_neuronx_venv_pytorch_2_9"
         )
+nxd_version = Version(version("neuronx-distributed"))
+if not (Version("0.18") <= nxd_version < Version("0.20")):
+    raise SystemExit(
+        f"neuronx-distributed {nxd_version} is outside the supported "
+        "PyTorch 2.9 DLAMI range (0.18.x or 0.19.x)"
+    )
 
 import optimum.neuron
 import neuronx_distributed

@@ -142,10 +142,10 @@ PY
 
 The `torch_neuronx` path must point into
 `aws_neuronx_venv_pytorch_2_9`, not a source checkout such as
-`$HOME/torch-neuronx`. The setup requires the DLAMI-provided NxD 0.18 line and
-refuses to install or upgrade a missing Neuron binary package. The runtime
-device count should be 64 on a `trn2.48xlarge` using the default LNC=2
-configuration.
+`$HOME/torch-neuronx`. The setup accepts the DLAMI-provided NxD 0.18 and 0.19
+lines used by AWS PyTorch 2.9 releases—including `0.19.28492`—and refuses to
+install or upgrade a missing Neuron binary package. The runtime device count
+should be 64 on a `trn2.48xlarge` using the default LNC=2 configuration.
 
 ## Dataset layout used by this project
 
