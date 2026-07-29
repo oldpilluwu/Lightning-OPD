@@ -8,8 +8,20 @@ export PYTHONNOUSERSITE=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${VENV_DIR:-${HOME}/venvs/lightning-opd-sft}"
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 NEURON_INDEX_URL="${NEURON_INDEX_URL:-https://pip.repos.neuron.amazonaws.com}"
+
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+    for candidate in python3.10 python3.11 python3; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            candidate_version="$("${candidate}" -c \
+                'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+            if [[ "${candidate_version}" == "3.10" || "${candidate_version}" == "3.11" ]]; then
+                PYTHON_BIN="${candidate}"
+                break
+            fi
+        fi
+    done
+fi
 
 if ! command -v neuron-ls >/dev/null 2>&1; then
     echo "ERROR: neuron-ls is unavailable." >&2
@@ -20,10 +32,13 @@ if ! neuron-ls >/dev/null; then
     echo "ERROR: Neuron devices are not visible to the instance." >&2
     exit 1
 fi
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-    echo "ERROR: ${PYTHON_BIN} is unavailable." >&2
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+    echo "ERROR: Python 3.10 or 3.11 is required by the pinned Optimum Neuron stack." >&2
+    echo "Set PYTHON_BIN=/path/to/python3.10 if it is installed in a nonstandard location." >&2
     exit 1
 fi
+
+echo "Using Python: $("${PYTHON_BIN}" --version 2>&1)"
 
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
     "${PYTHON_BIN}" -m venv "${VENV_DIR}"

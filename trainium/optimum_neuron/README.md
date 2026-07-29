@@ -76,6 +76,9 @@ Use an Ubuntu 24.04 Neuron PyTorch DLAMI. The AWS DLAMI already supplies the
 driver and system tools; do not clone `torch-neuronx` into the working
 directory.
 
+The pinned stack supports Python 3.10 and 3.11. The setup wrapper automatically
+selects either version; Python 3.11 is not required.
+
 The setup wrapper creates an isolated environment with the pinned upstream
 Optimum Neuron stack:
 
