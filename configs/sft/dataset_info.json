@@ -4,6 +4,13 @@
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
     }
   },
   "openthoughts3_300k_qwen3-32b": {
@@ -11,6 +18,13 @@
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
     }
   }
 }

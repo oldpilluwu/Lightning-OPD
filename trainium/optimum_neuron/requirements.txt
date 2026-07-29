@@ -1,0 +1,4 @@
+optimum-neuron[neuronx] @ git+https://github.com/huggingface/optimum-neuron.git@4a80f2f3de15e83e978a6f3c0d43224626d921ca
+datasets
+wandb
+matplotlib
