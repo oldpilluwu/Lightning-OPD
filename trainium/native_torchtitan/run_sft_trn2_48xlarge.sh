@@ -80,7 +80,7 @@ for parquet_file in parquet_files:
 if rows != expected_rows:
     raise SystemExit(
         f"Found {rows} SFT rows across {len(parquet_files)} parquet files; "
-        f"expected {expected_rows}. Copy both generated shards onto this instance."
+        f"expected {expected_rows}. Check SFT_DATA against the generated dataset."
     )
 
 config = AutoConfig.from_pretrained(

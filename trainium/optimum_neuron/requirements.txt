@@ -1,4 +1,9 @@
-optimum-neuron[neuronx] @ git+https://github.com/huggingface/optimum-neuron.git@4a80f2f3de15e83e978a6f3c0d43224626d921ca
-datasets
-wandb
-matplotlib
+transformers==4.57.1
+optimum==2.0.0
+huggingface-hub==0.36.0
+accelerate==1.8.1
+datasets==4.3.0
+wandb==0.22.3
+matplotlib==3.10.7
+numpy==1.26.4
+protobuf>=3.20.3

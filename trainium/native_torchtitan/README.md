@@ -35,23 +35,21 @@ the final position is padding.
 
 ## Put all data on the training instance
 
-The SFT dataset was generated on two instances, but training uses only one
-`trn2.48xlarge`. Copy both generated 150K parquet shards into one directory on
-that training instance. The launcher validates that it can see 300,000 rows and
-a `messages` column before starting.
+The SFT dataset was generated on one `trn2.48xlarge`, and training also uses
+one `trn2.48xlarge`. The launcher validates that it can see 300,000 rows and a
+`messages` column before starting.
 
 No EFA configuration, cross-node rendezvous, or shared filesystem is needed.
-The model, both dataset shards, and output directory only need to be available
-on the training host. Use durable EBS or FSx for checkpoints if you need them
-to survive loss of the instance; local instance storage is not durable.
+The model, dataset, and output directory only need to be available on the
+training host. Use durable EBS or FSx for checkpoints if you need them to
+survive loss of the instance; local instance storage is not durable.
 
 Suggested layout:
 
 ```text
 /data/lightning-opd/
   data/sft/
-    openthoughts3_300k_qwen3-8b_node00000-of-00002.parquet
-    openthoughts3_300k_qwen3-8b_node00001-of-00002.parquet
+    openthoughts3_300000_qwen3-8b.parquet
   models/Qwen3-4B-Base/
   runs/
 ```

@@ -1,8 +1,14 @@
 # Qwen3-4B full SFT on one trn2.48xlarge
 
 This is full-parameter training. There is no PEFT configuration, no adapter,
-and no LoRA merge step. The training backend is the maintained
-Optimum Neuron/XLA stack and its custom Qwen3 implementation.
+and no LoRA merge step. The backend is the DLAMI's Neuron PyTorch 2.9/XLA
+stack, NeuronX Distributed, and the audited Optimum Neuron custom Qwen3 model.
+
+This exact combination is a compatibility adaptation rather than an upstream
+Optimum Neuron release: Optimum has not published a PyTorch 2.9/Python 3.12
+package. AWS documents that 2.8-to-2.9 training scripts require no changes, and
+the Qwen3 model's required NxD APIs remain present in the PyTorch 2.9 stack.
+The topology smoke test is therefore a required gate before production.
 
 ## Reproduction contract
 
@@ -72,35 +78,51 @@ that correction, current LLaMA-Factory defaults to `from`/`value`.
 
 ## 1. Environment on a fresh instance
 
-Use an Ubuntu 24.04 Neuron PyTorch DLAMI. The AWS DLAMI already supplies the
-driver and system tools; do not clone `torch-neuronx` into the working
-directory.
+Use the Ubuntu 24.04 Neuron PyTorch DLAMI and its preinstalled
+`aws_neuronx_venv_pytorch_2_9` environment. Python 3.12 is supported by the
+Neuron PyTorch 2.9 binary stack; Python 3.11 is not required. The overlaid
+Optimum source revision itself declares Python `<3.12`, so using it with the
+DLAMI's Python 3.12 remains an explicit compatibility override that the smoke
+test must validate on the instance.
 
-The pinned stack supports Python 3.10 and 3.11. The setup wrapper automatically
-selects either version. If the DLAMI only exposes Python 3.12 and `uv` is
-installed, the wrapper installs a separate UV-managed Python 3.11. It does not
-modify `/opt/aws_neuronx_venv_pytorch_2_9`.
+The audited Optimum Neuron revision contains the custom Qwen3 training model,
+but its package metadata pins the older Neuron PyTorch 2.8 binaries. To honor
+the PyTorch 2.9 requirement, the setup wrapper:
 
-The setup wrapper creates an isolated environment with the pinned upstream
-Optimum Neuron stack:
+1. Uses the preinstalled PyTorch 2.9 venv without creating another venv.
+2. Verifies `torch` and `torch-neuronx` are both version 2.9.
+3. Installs pinned framework-neutral Python dependencies and verifies that no
+   AWS Neuron binary package version changed.
+4. Checks out the audited Optimum Neuron source without installing its pinned
+   Neuron binary dependencies.
+5. Makes the launcher load that Qwen3 Python source on top of the DLAMI's
+   PyTorch 2.9, Torch/XLA, compiler, and NeuronX Distributed packages.
 
 ```bash
+source "$HOME/aws_neuronx_venv_pytorch_2_9/bin/activate"
+unset PYTHONPATH
+
 bash "$HOME/Lightning-OPD/trainium/optimum_neuron/setup_instance.sh"
-source "$HOME/venvs/lightning-opd-sft/bin/activate"
 ```
 
-The wrapper clears `PYTHONPATH` and disables user-site packages so an old
-`$HOME/torch-neuronx` checkout cannot shadow the installed Neuron package.
+If the venv is under `/opt`, activate
+`/opt/aws_neuronx_venv_pytorch_2_9/bin/activate` instead. The wrapper detects
+either location. It clears `PYTHONPATH` and disables user-site packages so an
+old `$HOME/torch-neuronx` checkout cannot shadow the installed Neuron package.
 
-The requirements pin the audited Optimum Neuron Qwen3 implementation and its
-compatible Torch NeuronX/compiler versions. Verify the instance and imports:
+Verify the instance and imports:
 
 ```bash
 neuron-ls
+export OPTIMUM_NEURON_SRC="$HOME/optimum-neuron-qwen3-pt29"
+export PYTHONPATH="$OPTIMUM_NEURON_SRC"
 
 python - <<'PY'
+from importlib.metadata import version
 import torch
 import torch_neuronx
+import torch_xla
+import torch_xla.runtime as xr
 import optimum.neuron
 from optimum.neuron import NeuronTrainer
 from optimum.neuron.models.training import NeuronModelForCausalLM
@@ -108,26 +130,59 @@ from optimum.neuron.models.training import NeuronModelForCausalLM
 print("torch:", torch.__version__)
 print("torch-neuronx:", torch_neuronx.__version__)
 print("torch-neuronx path:", torch_neuronx.__file__)
+print("torch-xla:", version("torch-xla"))
+print("XLA device:", torch_xla.device())
+print("runtime device count:", xr.global_runtime_device_count())
 print("optimum-neuron:", optimum.neuron.__version__)
+print("optimum-neuron source:", optimum.neuron.__file__)
 print("full trainer:", NeuronTrainer)
 print("Qwen training model:", NeuronModelForCausalLM)
 PY
 ```
 
-The `torch_neuronx` path must point into this venv, not a source checkout such
-as `$HOME/torch-neuronx`.
+The `torch_neuronx` path must point into
+`aws_neuronx_venv_pytorch_2_9`, not a source checkout such as
+`$HOME/torch-neuronx`. The setup requires the DLAMI-provided NxD 0.18 line and
+refuses to install or upgrade a missing Neuron binary package. The runtime
+device count should be 64 on a `trn2.48xlarge` using the default LNC=2
+configuration.
+
+## Dataset layout used by this project
+
+Data generation and training both ran on one `trn2.48xlarge`. The generated
+dataset is already in the sibling `lightning-opd-prep` directory; do not
+download, regenerate, merge, or copy it:
+
+```text
+$HOME/
+  Lightning-OPD/
+  lightning-opd-prep/
+    sft_data/
+      openthoughts3_300000_qwen3-8b.parquet
+```
+
+Set these once after activating the environment:
+
+```bash
+export REPO_DIR="$HOME/Lightning-OPD"
+export PREP_DIR="$HOME/lightning-opd-prep"
+export SFT_DATA="$PREP_DIR/sft_data/openthoughts3_300000_qwen3-8b.parquet"
+export TOKENIZED_DATA="$PREP_DIR/sft_data/qwen3-4b-lf-packed-16384"
+export OUTPUT_ROOT="$PREP_DIR/training_runs"
+
+test -f "$SFT_DATA"
+```
 
 ## 2. Pre-tokenize the production dataset once
 
-Adjust the raw Parquet path to the location copied from the generation
-instance:
+Use the generated Parquet in the sibling preparation directory:
 
 ```bash
-cd "$HOME/Lightning-OPD"
+cd "$REPO_DIR"
 
 python trainium/optimum_neuron/prepare_sft_dataset.py \
-  --dataset-path /data/lightning-opd/data/sft/openthoughts3_300k_qwen3-8b.parquet \
-  --output-dir /data/lightning-opd/data/sft/qwen3-4b-lf-packed-16384 \
+  --dataset-path "$SFT_DATA" \
+  --output-dir "$TOKENIZED_DATA" \
   --model-id Qwen/Qwen3-4B-Base \
   --cutoff-len 16384 \
   --expected-rows 300000 \
@@ -143,16 +198,19 @@ tokenized dataset.
 ## 3. Smoke test
 
 The smoke wrapper makes a separately packed 1,024-token dataset from the first
-1,000 rows and runs two full-model optimizer steps on one TP8 group:
+1,000 rows and runs two full-model optimizer steps on 16 workers (two TP8
+groups). Sixteen is the smallest Trn2-supported XLA worker count divisible by
+TP8. It automatically resolves the sibling path shown above, so no data
+argument is needed:
 
 ```bash
-cd "$HOME/Lightning-OPD"
-SFT_DATA=/data/lightning-opd/data/sft/openthoughts3_300k_qwen3-8b.parquet \
+cd "$REPO_DIR"
 bash trainium/optimum_neuron/run_smoke_test.sh
 ```
 
 Startup must print `FULL MODEL` and the full trainable parameter count.
-Success ends with `SMOKE_TEST_OK`.
+Success ends with `SMOKE_TEST_OK`. If the preparation directory is elsewhere,
+pass `PREP_DIR=/other/path` or `SFT_DATA=/other/file.parquet`.
 
 ## 4. Precompile production shapes
 
@@ -160,31 +218,33 @@ Compilation uses the exact TP8, BF16, batch-1, and 16,384-token production
 shapes:
 
 ```bash
-TOKENIZED_DATA=/data/lightning-opd/data/sft/qwen3-4b-lf-packed-16384 \
+mkdir -p "$OUTPUT_ROOT"
+
+TOKENIZED_DATA="$TOKENIZED_DATA" \
 SEQUENCE_LENGTH=16384 \
-OUTPUT_DIR=/data/lightning-opd/runs/qwen3-4b-full-sft-compile \
+OUTPUT_DIR="$OUTPUT_ROOT/qwen3-4b-full-sft-compile" \
 neuron_parallel_compile \
   bash trainium/optimum_neuron/run_sft_trn2_48xlarge.sh \
-  2>&1 | tee /data/lightning-opd/runs/qwen3-4b-full-sft-compile.log
+  2>&1 | tee "$OUTPUT_ROOT/qwen3-4b-full-sft-compile.log"
 ```
 
 ## 5. Train
 
 ```bash
-TOKENIZED_DATA=/data/lightning-opd/data/sft/qwen3-4b-lf-packed-16384 \
+TOKENIZED_DATA="$TOKENIZED_DATA" \
 SEQUENCE_LENGTH=16384 \
-OUTPUT_DIR=/data/lightning-opd/runs/qwen3-4b-full-sft \
+OUTPUT_DIR="$OUTPUT_ROOT/qwen3-4b-full-sft" \
 bash trainium/optimum_neuron/run_sft_trn2_48xlarge.sh \
-  2>&1 | tee /data/lightning-opd/runs/qwen3-4b-full-sft.log
+  2>&1 | tee "$OUTPUT_ROOT/qwen3-4b-full-sft.log"
 ```
 
 Resume with the same output directory and an explicit checkpoint:
 
 ```bash
-TOKENIZED_DATA=/data/lightning-opd/data/sft/qwen3-4b-lf-packed-16384 \
+TOKENIZED_DATA="$TOKENIZED_DATA" \
 SEQUENCE_LENGTH=16384 \
-OUTPUT_DIR=/data/lightning-opd/runs/qwen3-4b-full-sft \
-RESUME_FROM_CHECKPOINT=/data/lightning-opd/runs/qwen3-4b-full-sft/checkpoint-100 \
+OUTPUT_DIR="$OUTPUT_ROOT/qwen3-4b-full-sft" \
+RESUME_FROM_CHECKPOINT="$OUTPUT_ROOT/qwen3-4b-full-sft/checkpoint-100" \
 bash trainium/optimum_neuron/run_sft_trn2_48xlarge.sh
 ```
 
@@ -195,13 +255,13 @@ normal Hugging Face safetensors checkpoint:
 
 ```bash
 optimum-cli neuron consolidate \
-  /data/lightning-opd/runs/qwen3-4b-full-sft \
-  /data/lightning-opd/runs/qwen3-4b-full-sft-hf
+  "$OUTPUT_ROOT/qwen3-4b-full-sft" \
+  "$OUTPUT_ROOT/qwen3-4b-full-sft-hf"
 
-cp /data/lightning-opd/runs/qwen3-4b-full-sft/*.json \
-  /data/lightning-opd/runs/qwen3-4b-full-sft-hf/
-cp /data/lightning-opd/runs/qwen3-4b-full-sft/tokenizer* \
-  /data/lightning-opd/runs/qwen3-4b-full-sft-hf/
+cp "$OUTPUT_ROOT/qwen3-4b-full-sft/"*.json \
+  "$OUTPUT_ROOT/qwen3-4b-full-sft-hf/"
+cp "$OUTPUT_ROOT/qwen3-4b-full-sft/"tokenizer* \
+  "$OUTPUT_ROOT/qwen3-4b-full-sft-hf/"
 ```
 
 There is no adapter merge step.
@@ -215,7 +275,7 @@ git -C /tmp/LLaMA-Factory checkout \
 
 python trainium/optimum_neuron/compare_preprocessing.py \
   --llamafactory-repo /tmp/LLaMA-Factory \
-  --dataset-path /data/lightning-opd/data/sft/openthoughts3_300k_qwen3-8b.parquet \
+  --dataset-path "$SFT_DATA" \
   --model-id Qwen/Qwen3-4B-Base \
   --cutoff-len 16384 \
   --num-samples 1000
