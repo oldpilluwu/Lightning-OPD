@@ -18,6 +18,7 @@ import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.parallel_loader as pl
 from datasets import load_from_disk
+from torch.distributed.elastic.multiprocessing.errors import record
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import Qwen3Config, default_data_collator
 from transformers.optimization import get_cosine_schedule_with_warmup
@@ -210,6 +211,7 @@ def save_training_checkpoint(
     )
 
 
+@record
 def main() -> None:
     args = parse_args()
     initialize_distributed(args.ddp_timeout)
@@ -217,7 +219,6 @@ def main() -> None:
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    model_parallel_xla_manual_seed(args.seed)
 
     dataset_path = Path(args.tokenized_dataset).expanduser().resolve()
     checkpoint_path = Path(args.pretrained_checkpoint).expanduser().resolve()
@@ -257,6 +258,9 @@ def main() -> None:
             "use_master_weights_in_ckpt": False,
         },
     )
+    # neuronx_distributed_config initializes the TP groups required by this
+    # model-parallel RNG tracker.
+    model_parallel_xla_manual_seed(args.seed)
 
     config = Qwen3Config.from_pretrained(args.model_id)
     config.use_cache = False
