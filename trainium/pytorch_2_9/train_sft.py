@@ -375,14 +375,18 @@ def main() -> None:
             if micro_step % args.gradient_accumulation_steps:
                 continue
 
-            xm.mark_step()
             # Keep metrics out of the compiled optimizer graph. On the PyTorch
             # 2.9/NxD 0.19 Trn2 stack, materializing a standalone xm.all_reduce
             # over a DP subgroup can produce an invalid send/recv target. The
             # model loss is already identical across TP ranks because
             # parallel_cross_entropy performs its TP reduction, so averaging
             # the local scalar across the host mesh gives the same DP mean.
+            #
+            # This snapshot must be created before mark_step. That materializes
+            # it with the forward/backward graph; creating it afterwards makes
+            # the step closure reconstruct the TP loss graph by itself.
             local_loss = accumulated_loss.detach().clone()
+            xm.mark_step()
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
@@ -437,8 +441,11 @@ def main() -> None:
                     ),
                 )
 
+            # Execute the optimizer graph and its closures in this iteration.
+            # Deferring this to the next MpDeviceLoader fetch lets a logging
+            # SyncTensorsGraph escape the collective step that produced it.
+            xm.mark_step()
             if global_step >= args.max_steps:
-                xm.mark_step()
                 break
         epoch += 1
 
