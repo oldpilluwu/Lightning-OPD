@@ -376,11 +376,13 @@ def main() -> None:
                 continue
 
             xm.mark_step()
-            reduced_loss = xm.all_reduce(
-                xm.REDUCE_SUM,
-                accumulated_loss / dp_size,
-                groups=parallel_state.get_data_parallel_replica_groups(),
-            )
+            # Keep metrics out of the compiled optimizer graph. On the PyTorch
+            # 2.9/NxD 0.19 Trn2 stack, materializing a standalone xm.all_reduce
+            # over a DP subgroup can produce an invalid send/recv target. The
+            # model loss is already identical across TP ranks because
+            # parallel_cross_entropy performs its TP reduction, so averaging
+            # the local scalar across the host mesh gives the same DP mean.
+            local_loss = accumulated_loss.detach().clone()
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
@@ -389,7 +391,14 @@ def main() -> None:
 
             def log_step(loss_tensor: torch.Tensor, step: int) -> None:
                 nonlocal last_loss
-                last_loss = float(loss_tensor.cpu().item())
+                local_loss_value = float(loss_tensor.cpu().item())
+                last_loss = float(
+                    xm.mesh_reduce(
+                        f"train-loss-{step}",
+                        local_loss_value,
+                        lambda values: sum(values) / len(values),
+                    )
+                )
                 if xm.is_master_ordinal(local=False):
                     elapsed = time.time() - start_time
                     lr = optimizer.param_groups[0]["lr"]
@@ -412,7 +421,7 @@ def main() -> None:
                         )
 
             if global_step % args.logging_steps == 0:
-                xm.add_step_closure(log_step, (reduced_loss.detach(), global_step))
+                xm.add_step_closure(log_step, (local_loss, global_step))
 
             if args.save_steps > 0 and global_step % args.save_steps == 0:
                 xm.add_step_closure(
