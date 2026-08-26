@@ -305,10 +305,29 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
             for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
         ]
 
-        advantages = [
+        raw_advantages = [
             teacher_log_prob - student_log_prob
             for teacher_log_prob, student_log_prob in zip(teacher_log_probs, student_log_probs, strict=False)
         ]
+
+        clip = getattr(args, "opd_advantage_clip", None)
+        advantages = (
+            [advantage.clamp(min=-clip, max=clip) for advantage in raw_advantages]
+            if clip is not None
+            else raw_advantages
+        )
+
+        raw_flat = torch.cat(raw_advantages).float()
+        rollout_data["opd_advantage_unclipped"] = raw_advantages
+        rollout_data["opd_advantage_abs"] = [advantage.abs() for advantage in raw_advantages]
+        rollout_data["opd_advantage_positive"] = [
+            (advantage > 0).to(torch.float32) for advantage in raw_advantages
+        ]
+        rollout_data["opd_advantage_clip_mask"] = [
+            (advantage.abs() > clip).to(torch.float32) if clip is not None else torch.zeros_like(advantage)
+            for advantage in raw_advantages
+        ]
+        rollout_data["opd_advantage_std"] = raw_flat.std(unbiased=False)
 
         returns = advantages
 

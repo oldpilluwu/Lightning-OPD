@@ -11,6 +11,7 @@ except ImportError:
 
 from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from slime.utils.arguments import parse_args
+from slime.utils.checkpoint_schedule import scheduled_checkpoint
 from slime.utils.logging_utils import configure_logger
 from slime.utils.tracking_utils import init_tracking
 
@@ -82,15 +83,32 @@ def train(args):
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
 
-        if args.save_interval is not None and (
-            (rollout_id + 1) % args.save_interval == 0
-            or (num_rollout_per_epoch is not None and (rollout_id + 1) % num_rollout_per_epoch == 0)
-        ):
+        completed_step = rollout_id + 1
+        explicit_save, explicit_optimizer = scheduled_checkpoint(
+            completed_step,
+            args.checkpoint_steps,
+            args.optimizer_checkpoint_steps,
+        )
+        interval_save = args.save_interval is not None and (
+            completed_step % args.save_interval == 0
+            or (num_rollout_per_epoch is not None and completed_step % num_rollout_per_epoch == 0)
+        )
+        if explicit_save or interval_save:
+            include_optimizer = explicit_optimizer if explicit_save else True
+            checkpoint_iteration = completed_step if explicit_save else rollout_id
             if (not args.use_critic) or (rollout_id >= args.num_critic_only_steps):
-                actor_model.save_model(rollout_id)
+                actor_model.save_model(
+                    checkpoint_iteration,
+                    include_optimizer=include_optimizer,
+                    completed_step=explicit_save,
+                )
             if args.use_critic:
-                critic_model.save_model(rollout_id)
-            if args.rollout_global_dataset:
+                critic_model.save_model(
+                    checkpoint_iteration,
+                    include_optimizer=include_optimizer,
+                    completed_step=explicit_save,
+                )
+            if args.rollout_global_dataset and include_optimizer:
                 ray.get(rollout_manager.save.remote(rollout_id))
 
         # Policy lag: only sync rollout engine weights every update_weights_interval steps.

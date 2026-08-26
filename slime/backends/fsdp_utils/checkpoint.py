@@ -190,7 +190,7 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
     dist.barrier()
 
 
-def save(actor: Any, iteration: int) -> None:
+def save(actor: Any, iteration: int, *, include_optimizer: bool = True, completed_step: bool = False) -> None:
     """Save checkpoint to disk.
 
     Saves model weights and optimizer state to separate directories.
@@ -199,7 +199,7 @@ def save(actor: Any, iteration: int) -> None:
     torch.cuda.synchronize()
 
     base_dir = Path(actor.args.save).expanduser()
-    step_id = iteration + 1
+    step_id = iteration if completed_step else iteration + 1
     checkpoint_dir = base_dir / f"iter_{step_id:07d}"
     model_dir = checkpoint_dir / "model"
     optimizer_dir = checkpoint_dir / "optimizer"
@@ -208,8 +208,9 @@ def save(actor: Any, iteration: int) -> None:
     if dist.get_rank() == 0:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         model_dir.mkdir(parents=True, exist_ok=True)
-        optimizer_dir.mkdir(parents=True, exist_ok=True)
-        lr_scheduler_dir.mkdir(parents=True, exist_ok=True)
+        if include_optimizer:
+            optimizer_dir.mkdir(parents=True, exist_ok=True)
+            lr_scheduler_dir.mkdir(parents=True, exist_ok=True)
     dist.barrier()
 
     # Save model weights
@@ -218,21 +219,22 @@ def save(actor: Any, iteration: int) -> None:
     dcp.save(state_dict, checkpoint_id=str(model_dir))
 
     # Save optimizer state
-    if hasattr(actor, "optimizer") and actor.optimizer is not None:
+    if include_optimizer and hasattr(actor, "optimizer") and actor.optimizer is not None:
         optimizer_state = OptimizerState(actor.model, actor.optimizer)
         optim_state_dict = {"optim_state": optimizer_state}
         dcp.save(optim_state_dict, checkpoint_id=str(optimizer_dir))
 
     # Save LR scheduler state
-    if hasattr(actor, "lr_scheduler") and actor.lr_scheduler is not None:
+    if include_optimizer and hasattr(actor, "lr_scheduler") and actor.lr_scheduler is not None:
         lr_scheduler_state = LRSchedulerState(actor.lr_scheduler)
         lr_scheduler_state_dict = {"lr_scheduler_state": lr_scheduler_state}
         dcp.save(lr_scheduler_state_dict, checkpoint_id=str(lr_scheduler_dir))
 
     if dist.get_rank() == 0:
-        rng_state = {"torch": torch.get_rng_state()}
-        rng_state["cuda"] = torch.cuda.get_rng_state_all()
-        torch.save(rng_state, checkpoint_dir / "rng.pt")
+        if include_optimizer:
+            rng_state = {"torch": torch.get_rng_state()}
+            rng_state["cuda"] = torch.cuda.get_rng_state_all()
+            torch.save(rng_state, checkpoint_dir / "rng.pt")
 
         metadata = {
             "iteration": step_id,
@@ -242,10 +244,14 @@ def save(actor: Any, iteration: int) -> None:
             "micro_step": actor.micro_step,
             "world_size": dist.get_world_size(),
             "timestamp": time.time(),
+            "checkpoint_kind": "resumable" if include_optimizer else "weights_only",
         }
         _write_checkpoint_metadata(checkpoint_dir / "meta.json", metadata)
 
-        tracker_file = base_dir / "latest_checkpointed_iteration.txt"
+        tracker_name = (
+            "latest_checkpointed_iteration.txt" if include_optimizer else "latest_model_checkpointed_iteration.txt"
+        )
+        tracker_file = base_dir / tracker_name
         tracker_file.write_text(str(step_id))
         logger.info(f"[FSDP] Saved checkpoint to {checkpoint_dir}")
 

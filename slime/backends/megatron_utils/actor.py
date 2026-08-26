@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import os
 import random
@@ -18,6 +19,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 from slime.ray.train_actor import TrainRayActor
 from slime.utils import train_dump_utils
+from slime.utils.checkpoint_schedule import checkpoint_directory, write_checkpoint_manifest
 from slime.utils.context_utils import with_defer
 from slime.utils.data import process_rollout_data
 from slime.utils.distributed_utils import get_gloo_group, init_process_group
@@ -64,6 +66,8 @@ class MegatronTrainRayActor(TrainRayActor):
             init_tracking(args, primary=False)
 
         self.prof = TrainProfiler(args)
+        self.trained_response_tokens = 0
+        self.trained_total_tokens = 0
 
         # read config and tokenizer serialized to prevent concurrent writing bug.
         for i in range(dist.get_world_size()):
@@ -100,7 +104,13 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.sleep()
             return
 
-        start_rollout_id = loaded_rollout_id + 1
+        start_rollout_id = loaded_rollout_id if args.checkpoint_steps else loaded_rollout_id + 1
+        if args.checkpoint_steps and loaded_rollout_id > 0:
+            manifest_path = checkpoint_directory(args.load, loaded_rollout_id) / "manifest.json"
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.trained_response_tokens = int(manifest.get("trained_response_tokens", 0))
+                self.trained_total_tokens = int(manifest.get("trained_total_tokens", 0))
 
         self.weights_backuper = TensorBackuper.create(
             source_getter=lambda: named_params_and_buffers(
@@ -371,6 +381,8 @@ class MegatronTrainRayActor(TrainRayActor):
         )
 
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
+        self.trained_response_tokens += sum(int(length) for length in rollout_data["response_lengths"])
+        self.trained_total_tokens += sum(int(length) for length in rollout_data["total_lengths"])
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
@@ -462,7 +474,13 @@ class MegatronTrainRayActor(TrainRayActor):
         log_perf_data(rollout_id, self.args)
 
     @timer
-    def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
+    def save_model(
+        self,
+        rollout_id: int,
+        force_sync: bool = False,
+        include_optimizer: bool = True,
+        completed_step: bool = False,
+    ) -> None:
         if self.args.debug_rollout_only:
             return
 
@@ -475,7 +493,23 @@ class MegatronTrainRayActor(TrainRayActor):
 
             maybe_finalize_async_save(blocking=True)
 
-        save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
+        save(
+            rollout_id,
+            self.model,
+            self.optimizer,
+            self.opt_param_scheduler,
+            include_optimizer=include_optimizer,
+        )
+
+        if completed_step and is_megatron_main_rank():
+            write_checkpoint_manifest(
+                checkpoint_directory(self.args.save, rollout_id),
+                args=self.args,
+                completed_step=rollout_id,
+                include_optimizer=include_optimizer,
+                trained_response_tokens=self.trained_response_tokens,
+                trained_total_tokens=self.trained_total_tokens,
+            )
 
         if force_sync and self.args.async_save:
             maybe_finalize_async_save(blocking=True)

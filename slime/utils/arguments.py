@@ -13,6 +13,7 @@ from transformers import AutoConfig
 
 from slime.backends.sglang_utils.arguments import add_sglang_arguments
 from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
+from slime.utils.checkpoint_schedule import parse_step_list, validate_checkpoint_schedule
 from slime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from slime.utils.logging_utils import configure_logger
 
@@ -731,6 +732,21 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             reset_arg(parser, "--load", type=str, default=None)
             reset_arg(parser, "--save", type=str, default=None)
             reset_arg(parser, "--save-interval", type=int, default=None)
+            parser.add_argument(
+                "--checkpoint-steps",
+                type=parse_step_list,
+                default=(),
+                help="Comma-separated completed-update counts at which to save model checkpoints.",
+            )
+            parser.add_argument(
+                "--optimizer-checkpoint-steps",
+                type=parse_step_list,
+                default=(),
+                help=(
+                    "Subset of --checkpoint-steps that also save optimizer, scheduler, and RNG state. "
+                    "Other scheduled checkpoints contain model weights only."
+                ),
+            )
             reset_arg(parser, "--async-save", action="store_true")
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
@@ -803,6 +819,16 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ],
                 default="grpo",
             )
+            parser.add_argument(
+                "--opd-advantage-clip",
+                type=float,
+                default=None,
+                help="Symmetric absolute clip for sampled-token OPD advantages; disabled by default.",
+            )
+            parser.add_argument("--opd-student-model-id", type=str, default=None)
+            parser.add_argument("--opd-student-model-revision", type=str, default=None)
+            parser.add_argument("--opd-teacher-model-id", type=str, default=None)
+            parser.add_argument("--opd-teacher-model-revision", type=str, default=None)
             parser.add_argument(
                 "--disable-compute-advantages-and-returns",
                 action="store_false",
@@ -1533,6 +1559,14 @@ def slime_validate_args(args):
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
+
+    validate_checkpoint_schedule(args)
+
+    if args.opd_advantage_clip is not None:
+        assert args.opd_advantage_clip > 0, "--opd-advantage-clip must be positive"
+        assert args.advantage_estimator == "on_policy_distillation", (
+            "--opd-advantage-clip is only valid with --advantage-estimator on_policy_distillation"
+        )
 
     assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
 

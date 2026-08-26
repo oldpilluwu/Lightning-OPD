@@ -289,6 +289,69 @@ python configs/opd/qwen3-4b-opd.py
 
 This allocates GPUs for both the actor (training) and the teacher server (rollout scoring), resulting in ~3.6x higher compute cost.
 
+### Single A6000: Qwen3-1.7B student and Qwen3-4B teacher
+
+The repository includes a one-GPU research configuration for standard online OPD. It uses the public
+`lllyx/Qwen3-1.7B-SFT` cold-start checkpoint and scores its live rollouts with `Qwen/Qwen3-4B` in
+non-thinking mode. The existing multi-GPU comparison configurations are unchanged.
+
+Run these commands inside the project container on Linux:
+
+```bash
+# Read-only hardware/storage check. Configure >=32 GiB NVMe swap if warned.
+python tools/check_qwen3_1p7b_opd_system.py --storage-path /root/models
+
+# Downloads immutable dataset revisions from the 17,398-prompt DAPO mirror,
+# removes 64 held-out DAPO diagnostics
+# from training, and prepares MATH-500/AIME/AMC evaluation files.
+python scripts/prepare_qwen3_1p7b_opd_data.py \
+    --output-dir /root/datasets/qwen3-1.7b-opd
+
+# Two-update memory and integration smoke test. It creates no official snapshots.
+OPD_SMOKE_TEST=1 python configs/opd/qwen3-1.7b-a6000-opd.py
+
+# Full 150-update run.
+python configs/opd/qwen3-1.7b-a6000-opd.py
+```
+
+The full run saves model weights after updates
+`1,2,3,4,5,10,15,20,25,30,50,75,100,125,150`. Only updates `50,100,150` include
+optimizer, scheduler, RNG, and data-cursor state. Weight-only saves do not replace
+`latest_checkpointed_iteration.txt`, so automatic resume always selects the most recent
+resumable checkpoint. Each snapshot has a SHA256 manifest and uses completed-update numbering.
+
+If the initial GPU allocation is too tight, first retry with lower SGLang pools and concurrency:
+
+```bash
+OPD_TEACHER_MEM_FRACTION=0.20 \
+OPD_ROLLOUT_MEM_FRACTION=0.13 \
+OPD_SERVER_CONCURRENCY=1 \
+python configs/opd/qwen3-1.7b-a6000-opd.py
+```
+
+If 4096 response tokens still do not fit, set `OPD_MAX_RESPONSE_LEN=3072` for the smoke test,
+training, and post-training evaluation. Do not quantize the teacher, because doing so changes the
+distillation target.
+
+After update 150 finishes, convert and evaluate every saved checkpoint. This command is resumable;
+it appends each completed generation or diagnostic record before continuing:
+
+```bash
+export OPD_CHECKPOINT_ROOT=/root/models/Qwen3-1.7B-SFT-Qwen3-4B-OPD_ckpt__qwen3-1.7b-a6000-opd
+export SFT_CHECKPOINT=/root/models/Qwen3-1.7B-SFT
+export TEACHER_CHECKPOINT=/root/models/Qwen3-4B
+export OPD_HF_CHECKPOINT_ROOT=/root/models/Qwen3-1.7B-SFT-Qwen3-4B-OPD-hf
+export OPD_RESULTS_DIR=results/qwen3-1.7b-a6000-opd
+bash scripts/run_qwen3_1p7b_opd_post_training.sh
+```
+
+The post-training pipeline produces standalone Hugging Face checkpoints, raw JSONL results,
+CSV summaries, `report.md`, accuracy/alignment plots, and a response-position entropy-gap heatmap.
+It runs deterministic diagnostics at every saved update, complete MATH-500/AMC 2023/AIME 2024/AIME
+2025 evaluation at updates `0,25,50,75,100,125,150`, and sampled avg@4 evaluation at updates 0 and
+150. Benchmark rows are also marked for exact and MPNet semantic overlap with the training prompts,
+so the report includes overlap-free accuracy.
+
 ## 8B Scale Configuration
 
 For Qwen3-8B-Base (student) + Qwen3-32B (teacher):

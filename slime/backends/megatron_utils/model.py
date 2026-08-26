@@ -9,6 +9,7 @@ import os
 from argparse import Namespace
 from collections.abc import Callable, Sequence
 from functools import partial
+from pathlib import Path
 
 import torch
 from megatron.core import mpu
@@ -665,7 +666,12 @@ def train(
 
 
 def save(
-    iteration: int, model: Sequence[DDP], optimizer: MegatronOptimizer, opt_param_scheduler: OptimizerParamScheduler
+    iteration: int,
+    model: Sequence[DDP],
+    optimizer: MegatronOptimizer,
+    opt_param_scheduler: OptimizerParamScheduler,
+    *,
+    include_optimizer: bool = True,
 ) -> None:
     """Persist a training checkpoint safely with forward hooks disabled.
 
@@ -678,16 +684,34 @@ def save(
     args = get_args()
     if should_disable_forward_pre_hook(args):
         disable_forward_pre_hook(model)
-    save_checkpoint(
-        iteration,
-        model,
-        optimizer,
-        opt_param_scheduler,
-        num_floating_point_operations_so_far=0,
-        checkpointing_context=None,
-        train_data_iterator=None,
-        preprocess_common_state_dict_fn=None,
-    )
+    previous_no_save_optim = getattr(args, "no_save_optim", False)
+    previous_no_save_rng = getattr(args, "no_save_rng", False)
+    tracker_path = Path(args.save) / "latest_checkpointed_iteration.txt"
+    previous_tracker = tracker_path.read_text(encoding="utf-8") if tracker_path.exists() else None
+    try:
+        args.no_save_optim = not include_optimizer
+        args.no_save_rng = not include_optimizer
+        save_checkpoint(
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far=0,
+            checkpointing_context=None,
+            train_data_iterator=None,
+            preprocess_common_state_dict_fn=None,
+        )
+    finally:
+        args.no_save_optim = previous_no_save_optim
+        args.no_save_rng = previous_no_save_rng
+        if not include_optimizer and torch.distributed.get_rank() == 0:
+            model_tracker = Path(args.save) / "latest_model_checkpointed_iteration.txt"
+            model_tracker.write_text(str(iteration), encoding="utf-8")
+            if previous_tracker is None:
+                tracker_path.unlink(missing_ok=True)
+            else:
+                tracker_path.write_text(previous_tracker, encoding="utf-8")
+        torch.distributed.barrier()
     if should_disable_forward_pre_hook(args):
         enable_forward_pre_hook(model)
 
