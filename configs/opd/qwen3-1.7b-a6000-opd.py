@@ -75,7 +75,9 @@ def deploy_teacher_model() -> None:
     external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
 
     U.exec_command(
-        "pkill -9 -f 'sglang.launch_server.*Qwen3-4B' || true; "
+        # The bracketed first character prevents pkill from matching this
+        # bash -c command's own command line.
+        "pkill -9 -f '[s]glang.launch_server.*Qwen3-4B' || true; "
         f"{'' if external_ray else 'ray stop --force; '}"
         "sleep 3"
     )
