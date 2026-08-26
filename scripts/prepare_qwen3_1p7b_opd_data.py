@@ -175,7 +175,11 @@ def _resolve_and_load(api: HfApi, repo_id: str, split: str, revision: str) -> tu
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, default=Path("/root/datasets/qwen3-1.7b-opd"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "datasets/qwen3-1.7b-opd",
+    )
     parser.add_argument("--revision", default="main", help="Hub revision resolved to immutable commit SHAs")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dapo-diagnostic-count", type=int, default=64)

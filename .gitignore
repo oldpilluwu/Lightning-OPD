@@ -21,6 +21,9 @@ build/
 # Project-specific
 data/
 checkpoints/
+models/
+datasets/
+results/
 *.arrow
 *.sqsh
 *.parquet

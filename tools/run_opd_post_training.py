@@ -625,9 +625,10 @@ def main() -> None:
     parser.add_argument("--checkpoint-root", type=Path, required=True)
     parser.add_argument("--origin-hf", type=Path, required=True)
     parser.add_argument("--hf-root", type=Path, required=True)
-    parser.add_argument("--teacher-model", type=Path, default=Path("/root/models/Qwen3-4B"))
-    parser.add_argument("--data-dir", type=Path, default=Path("/root/datasets/qwen3-1.7b-opd"))
-    parser.add_argument("--output-dir", type=Path, default=Path("results/qwen3-1.7b-a6000-opd"))
+    project_root = Path(__file__).resolve().parents[1]
+    parser.add_argument("--teacher-model", type=Path, default=project_root / "models/Qwen3-4B")
+    parser.add_argument("--data-dir", type=Path, default=project_root / "datasets/qwen3-1.7b-opd")
+    parser.add_argument("--output-dir", type=Path, default=project_root / "results/qwen3-1.7b-a6000-opd")
     parser.add_argument("--steps", type=parse_steps, default=CHECKPOINT_STEPS)
     parser.add_argument("--full-benchmark-steps", type=parse_steps, default=FULL_BENCHMARK_STEPS)
     parser.add_argument("--device", default="cuda:0")

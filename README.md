@@ -298,14 +298,15 @@ non-thinking mode. The existing multi-GPU comparison configurations are unchange
 Run these commands inside the project container on Linux:
 
 ```bash
-# Read-only hardware/storage check. Configure >=32 GiB NVMe swap if warned.
-python tools/check_qwen3_1p7b_opd_system.py --storage-path /root/models
+# Read-only hardware/storage check. The project-local models directory need not exist yet.
+# Configure >=32 GiB NVMe swap if warned.
+python tools/check_qwen3_1p7b_opd_system.py --storage-path ./models
 
 # Downloads immutable dataset revisions from the 17,398-prompt DAPO mirror,
 # removes 64 held-out DAPO diagnostics
 # from training, and prepares MATH-500/AIME/AMC evaluation files.
 python scripts/prepare_qwen3_1p7b_opd_data.py \
-    --output-dir /root/datasets/qwen3-1.7b-opd
+    --output-dir ./datasets/qwen3-1.7b-opd
 
 # Two-update memory and integration smoke test. It creates no official snapshots.
 OPD_SMOKE_TEST=1 python configs/opd/qwen3-1.7b-a6000-opd.py
@@ -337,13 +338,14 @@ After update 150 finishes, convert and evaluate every saved checkpoint. This com
 it appends each completed generation or diagnostic record before continuing:
 
 ```bash
-export OPD_CHECKPOINT_ROOT=/root/models/Qwen3-1.7B-SFT-Qwen3-4B-OPD_ckpt__qwen3-1.7b-a6000-opd
-export SFT_CHECKPOINT=/root/models/Qwen3-1.7B-SFT
-export TEACHER_CHECKPOINT=/root/models/Qwen3-4B
-export OPD_HF_CHECKPOINT_ROOT=/root/models/Qwen3-1.7B-SFT-Qwen3-4B-OPD-hf
-export OPD_RESULTS_DIR=results/qwen3-1.7b-a6000-opd
+# These defaults resolve inside this project, so no exports are needed unless overriding them.
 bash scripts/run_qwen3_1p7b_opd_post_training.sh
 ```
+
+By default, this experiment stores downloads and checkpoints in `./models`, prepared data in
+`./datasets/qwen3-1.7b-opd`, and reports in `./results/qwen3-1.7b-a6000-opd`. Set
+`OPD_PROJECT_ROOT` before training and evaluation only when these directories should live under a
+different project-sized mount.
 
 The post-training pipeline produces standalone Hugging Face checkpoints, raw JSONL results,
 CSV summaries, `report.md`, accuracy/alignment plots, and a response-position entropy-gap heatmap.

@@ -9,6 +9,7 @@ rollout engine share that GPU using slime's colocated offload path.
 
 import os
 import random
+import shlex
 import string
 from pathlib import Path
 
@@ -19,6 +20,10 @@ MODEL_NAME = os.environ.get("OPD_MODEL_NAME", "Qwen3-1.7B-SFT-Qwen3-4B-OPD")
 MODEL_TYPE = "qwen3-1.7B"
 NUM_GPUS = 1
 
+PROJECT_ROOT = Path(os.environ.get("OPD_PROJECT_ROOT", Path(__file__).resolve().parents[2])).expanduser().resolve()
+MODEL_DIR = PROJECT_ROOT / "models"
+DATA_DIR = PROJECT_ROOT / "datasets/qwen3-1.7b-opd"
+
 STUDENT_MODEL_ID = os.environ.get("STUDENT_MODEL_ID", "lllyx/Qwen3-1.7B-SFT")
 TEACHER_MODEL_ID = os.environ.get("TEACHER_MODEL_ID", "Qwen/Qwen3-4B")
 STUDENT_MODEL_REVISION = os.environ.get(
@@ -27,9 +32,9 @@ STUDENT_MODEL_REVISION = os.environ.get(
 TEACHER_MODEL_REVISION = os.environ.get(
     "TEACHER_MODEL_REVISION", "1cfa9a7208912126459214e8b04321603b3df60c"
 )
-SFT_CHECKPOINT = os.environ.get("SFT_CHECKPOINT", "/root/models/Qwen3-1.7B-SFT")
-TEACHER_CHECKPOINT = os.environ.get("TEACHER_CHECKPOINT", "/root/models/Qwen3-4B")
-PROMPT_DATA = os.environ.get("OPD_PROMPT_DATA", "/root/datasets/qwen3-1.7b-opd/dapo_train.jsonl")
+SFT_CHECKPOINT = os.environ.get("SFT_CHECKPOINT", str(MODEL_DIR / "Qwen3-1.7B-SFT"))
+TEACHER_CHECKPOINT = os.environ.get("TEACHER_CHECKPOINT", str(MODEL_DIR / "Qwen3-4B"))
+PROMPT_DATA = os.environ.get("OPD_PROMPT_DATA", str(DATA_DIR / "dapo_train.jsonl"))
 
 TEACHER_IP = os.environ.get("MASTER_ADDR", "127.0.0.1")
 TEACHER_PORT = int(os.environ.get("OPD_TEACHER_PORT", "13141"))
@@ -46,19 +51,21 @@ OPTIMIZER_CHECKPOINT_STEPS = "50,100,150"
 
 
 def _download_models_and_data() -> None:
-    U.exec_command("mkdir -p /root/models /root/datasets/qwen3-1.7b-opd")
+    U.exec_command(f"mkdir -p {shlex.quote(str(MODEL_DIR))} {shlex.quote(str(DATA_DIR))}")
     if not Path(SFT_CHECKPOINT).exists():
         U.exec_command(
-            f"hf download {STUDENT_MODEL_ID} --revision {STUDENT_MODEL_REVISION} --local-dir {SFT_CHECKPOINT}"
+            f"hf download {shlex.quote(STUDENT_MODEL_ID)} --revision {shlex.quote(STUDENT_MODEL_REVISION)} "
+            f"--local-dir {shlex.quote(SFT_CHECKPOINT)}"
         )
     if not Path(TEACHER_CHECKPOINT).exists():
         U.exec_command(
-            f"hf download {TEACHER_MODEL_ID} --revision {TEACHER_MODEL_REVISION} --local-dir {TEACHER_CHECKPOINT}"
+            f"hf download {shlex.quote(TEACHER_MODEL_ID)} --revision {shlex.quote(TEACHER_MODEL_REVISION)} "
+            f"--local-dir {shlex.quote(TEACHER_CHECKPOINT)}"
         )
     if not Path(PROMPT_DATA).exists():
         U.exec_command(
             "python scripts/prepare_qwen3_1p7b_opd_data.py "
-            f"--output-dir {Path(PROMPT_DATA).parent}"
+            f"--output-dir {shlex.quote(str(Path(PROMPT_DATA).parent))}"
         )
 
 
@@ -98,12 +105,13 @@ def prepare() -> None:
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
         hf_checkpoint=SFT_CHECKPOINT,
+        dir_dst=str(MODEL_DIR),
     )
     deploy_teacher_model()
 
 
 def execute(rerun: bool = False) -> None:
-    save_path = f"/root/models/{MODEL_NAME}_ckpt__{Path(__file__).stem}/"
+    save_path = str(MODEL_DIR / f"{MODEL_NAME}_ckpt__{Path(__file__).stem}")
     num_rollout = 2 if SMOKE_TEST else 150
     rollout_batch_size = 2 if SMOKE_TEST else 16
     response_len = 512 if SMOKE_TEST else MAX_RESPONSE_LEN
@@ -111,7 +119,7 @@ def execute(rerun: bool = False) -> None:
 
     ckpt_args = (
         f"--hf-checkpoint {SFT_CHECKPOINT} "
-        f"--load /root/models/{MODEL_NAME}_torch_dist "
+        f"--load {MODEL_DIR / f'{MODEL_NAME}_torch_dist'} "
         f"--save {save_path} "
     )
     if not SMOKE_TEST:

@@ -15,7 +15,12 @@ def _gib(value: int) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--storage-path", type=Path, default=Path("/root/models"))
+    parser.add_argument(
+        "--storage-path",
+        type=Path,
+        default=Path.cwd() / "models",
+        help="Artifact directory (default: ./models). It need not exist yet.",
+    )
     args = parser.parse_args()
 
     failures = []
@@ -43,10 +48,20 @@ def main() -> None:
     if _gib(meminfo["SwapTotal"]) < 32:
         warnings.append("Configure at least 32 GiB of NVMe-backed swap before the full run")
 
-    disk = shutil.disk_usage(args.storage_path)
-    print(f"Free storage at {args.storage_path}: {_gib(disk.free):.1f} GiB")
-    if _gib(disk.free) < 150:
-        failures.append("At least 150 GiB free storage is required")
+    storage_path = args.storage_path.expanduser().absolute()
+    probe_path = storage_path
+    while not probe_path.exists() and probe_path != probe_path.parent:
+        probe_path = probe_path.parent
+    try:
+        disk = shutil.disk_usage(probe_path)
+        location = str(storage_path)
+        if probe_path != storage_path:
+            location += f" (filesystem checked at {probe_path})"
+        print(f"Free storage for {location}: {_gib(disk.free):.1f} GiB")
+        if _gib(disk.free) < 150:
+            failures.append("At least 150 GiB free storage is required")
+    except OSError as error:
+        failures.append(f"Unable to inspect storage path {storage_path}: {error}")
 
     for warning in warnings:
         print(f"WARNING: {warning}")
