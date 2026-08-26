@@ -1453,7 +1453,18 @@ def parse_args(add_custom_arguments=None):
     slime_validate_args(args)
 
     if backend == "megatron":
-        megatron_validate_args(args)
+        # Upstream Megatron requires --save-interval whenever --save is set.
+        # Explicit checkpoint schedules intentionally have no periodic save
+        # interval, so provide a non-triggering value only during validation
+        # and restore None before the training loop sees the arguments.
+        explicit_checkpoint_schedule = bool(args.checkpoint_steps) and args.save_interval is None
+        if explicit_checkpoint_schedule:
+            args.save_interval = max(args.checkpoint_steps) + 1
+        try:
+            megatron_validate_args(args)
+        finally:
+            if explicit_checkpoint_schedule:
+                args.save_interval = None
 
         # always use varlen
         args.variable_seq_lengths = True

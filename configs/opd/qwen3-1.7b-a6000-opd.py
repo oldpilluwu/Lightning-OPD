@@ -122,10 +122,10 @@ def execute(rerun: bool = False) -> None:
     ckpt_args = (
         f"--hf-checkpoint {SFT_CHECKPOINT} "
         f"--load {MODEL_DIR / f'{MODEL_NAME}_torch_dist'} "
-        f"--save {save_path} "
     )
     if not SMOKE_TEST:
         ckpt_args += (
+            f"--save {save_path} "
             f"--checkpoint-steps {CHECKPOINT_STEPS} "
             f"--optimizer-checkpoint-steps {OPTIMIZER_CHECKPOINT_STEPS} "
         )
