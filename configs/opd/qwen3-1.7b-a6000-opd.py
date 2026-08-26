@@ -47,7 +47,7 @@ MAX_CONTEXT_LEN = int(os.environ.get("OPD_MAX_CONTEXT_LEN", str(MAX_PROMPT_LEN +
 SMOKE_TEST = get_bool_env_var("OPD_SMOKE_TEST", "0")
 
 CHECKPOINT_STEPS = "1,2,3,4,5,10,15,20,25,30,50,75,100,125,150"
-OPTIMIZER_CHECKPOINT_STEPS = "50,100,150"
+OPTIMIZER_CHECKPOINT_STEPS = "50,150"
 
 
 def _download_models_and_data() -> None:

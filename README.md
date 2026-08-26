@@ -299,7 +299,7 @@ Run these commands inside the project container on Linux:
 
 ```bash
 # Read-only hardware/storage check. The project-local models directory need not exist yet.
-# Configure >=32 GiB NVMe swap if warned.
+# Configure >=16 GiB NVMe swap if warned.
 python tools/check_qwen3_1p7b_opd_system.py --storage-path ./models
 
 # Downloads immutable dataset revisions from the 17,398-prompt DAPO mirror,
@@ -316,7 +316,7 @@ python configs/opd/qwen3-1.7b-a6000-opd.py
 ```
 
 The full run saves model weights after updates
-`1,2,3,4,5,10,15,20,25,30,50,75,100,125,150`. Only updates `50,100,150` include
+`1,2,3,4,5,10,15,20,25,30,50,75,100,125,150`. Only updates `50,150` include
 optimizer, scheduler, RNG, and data-cursor state. Weight-only saves do not replace
 `latest_checkpointed_iteration.txt`, so automatic resume always selects the most recent
 resumable checkpoint. Each snapshot has a SHA256 manifest and uses completed-update numbering.

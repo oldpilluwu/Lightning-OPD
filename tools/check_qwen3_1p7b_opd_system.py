@@ -21,6 +21,12 @@ def main() -> None:
         default=Path.cwd() / "models",
         help="Artifact directory (default: ./models). It need not exist yet.",
     )
+    parser.add_argument(
+        "--minimum-free-storage-gib",
+        type=float,
+        default=120,
+        help="Minimum required free storage in GiB (default: 120).",
+    )
     args = parser.parse_args()
 
     failures = []
@@ -45,8 +51,8 @@ def main() -> None:
         meminfo[key] = int(value.strip().split()[0]) * 1024
     print(f"Host RAM: {_gib(meminfo['MemTotal']):.1f} GiB")
     print(f"Swap: {_gib(meminfo['SwapTotal']):.1f} GiB")
-    if _gib(meminfo["SwapTotal"]) < 32:
-        warnings.append("Configure at least 32 GiB of NVMe-backed swap before the full run")
+    if _gib(meminfo["SwapTotal"]) < 16:
+        warnings.append("Configure at least 16 GiB of NVMe-backed swap before the full run")
 
     storage_path = args.storage_path.expanduser().absolute()
     probe_path = storage_path
@@ -58,8 +64,10 @@ def main() -> None:
         if probe_path != storage_path:
             location += f" (filesystem checked at {probe_path})"
         print(f"Free storage for {location}: {_gib(disk.free):.1f} GiB")
-        if _gib(disk.free) < 150:
-            failures.append("At least 150 GiB free storage is required")
+        if _gib(disk.free) < args.minimum_free_storage_gib:
+            failures.append(
+                f"At least {args.minimum_free_storage_gib:g} GiB free storage is required"
+            )
     except OSError as error:
         failures.append(f"Unable to inspect storage path {storage_path}: {error}")
 
