@@ -1473,7 +1473,10 @@ def parse_args_train_backend():
     if os.environ.get("SLIME_BACKEND") is not None:
         raise Exception("`SLIME_BACKEND` is deprecated, please use --train-backend directly.")
 
-    parser = argparse.ArgumentParser()
+    # This preliminary parser only needs --train-backend. Keep unknown Megatron
+    # options unknown instead of abbreviating them to similarly named slime
+    # options (for example, --optimizer -> --optimizer-checkpoint-steps).
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     get_slime_extra_args_provider()(parser)
     args_partial, _ = parser.parse_known_args()
     return args_partial.train_backend
